@@ -10,6 +10,7 @@ const sections = [
   { id: 'partner', label: 'Partner Profile', icon: 'fa-building' },
   { id: 'risk', label: 'Risk Metrics', icon: 'fa-shield-halved' },
   { id: 'artifacts', label: 'Artifacts', icon: 'fa-file-shield' },
+  { id: 'azrael', label: 'Azrael Engine', icon: 'fa-skull-crossbones' },
   { id: 'summary', label: 'Summary', icon: 'fa-file-lines' },
 ];
 

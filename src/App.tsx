@@ -3,6 +3,7 @@ import HeroSection from './components/HeroSection';
 import PartnerProfile from './components/PartnerProfile';
 import RiskMetrics from './components/RiskMetrics';
 import ArtifactStatus from './components/ArtifactStatus';
+import AzraelEngine from './components/AzraelEngine';
 import BriefingSummary from './components/BriefingSummary';
 import Navigation from './components/Navigation';
 
@@ -26,6 +27,7 @@ export default function App() {
           partnerType={selectedPartner}
         />
         <ArtifactStatus />
+        <AzraelEngine />
         <BriefingSummary
           partner={selectedPartner}
           risk={selectedRisk}
@@ -33,7 +35,7 @@ export default function App() {
       </main>
       <footer className="border-t border-slate-800 py-8 px-6 text-center text-slate-500 text-sm">
         <p>Enterprise Design-Partner Briefing Document v2.4 — Confidential</p>
-        <p className="mt-1">Hybrid Autonomy Platform • Predicate-Driven Assurance Framework</p>
+        <p className="mt-1">Hybrid Autonomy Platform • Predicate-Driven Assurance Framework • Azrael Engine v1.2</p>
       </footer>
     </div>
   );

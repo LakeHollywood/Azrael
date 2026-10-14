@@ -55,7 +55,7 @@ if ! mutmut run; then
     toolfail "mutmut run exited non-zero"
 fi
 
-RESULTS="$(mutmut results 2>/dev/null || true)"
+RESULTS="$(mutmut results --all=True 2>/dev/null || true)"
 echo "----- mutmut results -----"
 echo "$RESULTS"
 echo "----------------------------"

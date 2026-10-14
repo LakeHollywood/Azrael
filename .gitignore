@@ -1,7 +1,5 @@
-__pycache__/
-*.pyc
+node_modules/
 
-# mutmut working dirs / caches
+# mutmut working directory (regenerated on every CI run)
 mutants/
-.hypothesis/
-.pytest_cache/
+__pycache__/

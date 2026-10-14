@@ -1,0 +1,11 @@
+# Mutation-testing configuration for the HITL approval-gate control plane.
+# Scope is deliberately narrow: only the constitutional risk module is
+# mutated, and only the threshold/override test suite is used as the
+# kill-set, so mutation results measure exactly the three guardrails:
+#   1. authz changes never evaluate below DUAL_APPROVAL (floor 60)
+#   2. ApprovalGate modifications always evaluate to RESTRICTED (100)
+#   3. the risk->policy mapping is monotonic across 0-100
+
+[tool.mutmut]
+source_paths = ["approval_gate/risk.py"]
+pytest_add_cli_args_test_selection = ["tests/test_risk_thresholds.py"]

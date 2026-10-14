@@ -153,8 +153,30 @@ def verify_telemetry_integrity(record, mono_ts, utc_ts, expected_hash):
     return True
 
 
-def daemon_loop():
-    """Continuous execution loop with dynamic watchdog backoff and systemd keep-alive."""
+def run_ingestion_cycle(notify=True):
+    """Execute one fetch/buffer cycle across all endpoints.
+
+    Returns True if at least one endpoint produced a buffered record.
+    Extracted from daemon_loop so CI unit/policy tests can exercise the
+    ingestion path without an infinite loop.
+    """
+    cycle_success = False
+    for name, url in NOAA_ENDPOINTS.items():
+        record, jitter, mono_ts = fetch_noaa(name, url)
+        if record:
+            bind_and_buffer(name, record, jitter, mono_ts)
+            cycle_success = True
+    if notify:
+        # Ping systemd watchdog keep-alive signal
+        sd_notify("WATCHDOG=1")
+    return cycle_success
+
+
+def daemon_loop(max_cycles=None):
+    """Continuous execution loop with dynamic watchdog backoff and systemd keep-alive.
+
+    ``max_cycles`` bounds iterations for testing; production runs it unset.
+    """
     poll_interval = 10.0
     backoff = 1.0
     max_backoff = 300.0
@@ -162,21 +184,14 @@ def daemon_loop():
     sd_notify("READY=1\nSTATUS=STS NOAA Ingestion Daemon Active")
     print("=== STS NOAA Ingestion Daemon Started ===")
 
-    while True:
-        cycle_success = False
-
-        for name, url in NOAA_ENDPOINTS.items():
-            record, jitter, mono_ts = fetch_noaa(name, url)
-            if record:
-                bind_and_buffer(name, record, jitter, mono_ts)
-                cycle_success = True
-
-        # Ping systemd watchdog keep-alive signal
-        sd_notify("WATCHDOG=1")
+    cycles = 0
+    while max_cycles is None or cycles < max_cycles:
+        cycles += 1
+        cycle_success = run_ingestion_cycle()
 
         if cycle_success:
             backoff = 1.0
-            time.sleep(poll_interval)
+            time.sleep(min(poll_interval, get_max_safe_backoff(default_cap=poll_interval)))
         else:
             # Dynamically cap sleep to half of WATCHDOG_USEC (or 15s fallback)
             # BEFORE sleeping so the watchdog ping cadence never exceeds

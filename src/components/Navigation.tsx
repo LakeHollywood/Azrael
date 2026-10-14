@@ -7,11 +7,12 @@ interface NavigationProps {
 
 const sections = [
   { id: 'overview', label: 'Overview', icon: 'fa-home' },
-  { id: 'partner', label: 'Partner Profile', icon: 'fa-building' },
-  { id: 'risk', label: 'Risk Metrics', icon: 'fa-shield-halved' },
+  { id: 'partner', label: 'Partner', icon: 'fa-building' },
+  { id: 'risk', label: 'Risk', icon: 'fa-shield-halved' },
   { id: 'artifacts', label: 'Artifacts', icon: 'fa-file-shield' },
-  { id: 'azrael', label: 'Azrael Engine', icon: 'fa-skull-crossbones' },
-  { id: 'incident', label: 'Incident Log', icon: 'fa-triangle-exclamation' },
+  { id: 'azrael', label: 'Azrael', icon: 'fa-skull-crossbones' },
+  { id: 'incident', label: 'Incident', icon: 'fa-triangle-exclamation' },
+  { id: 'deployment', label: 'Deploy', icon: 'fa-rocket' },
   { id: 'summary', label: 'Summary', icon: 'fa-file-lines' },
 ];
 
@@ -50,7 +51,7 @@ export default function Navigation({ activeSection, setActiveSection }: Navigati
             <button
               key={section.id}
               onClick={() => scrollToSection(section.id)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
                 activeSection === section.id
                   ? 'bg-cyan-500/20 text-cyan-300'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/50'

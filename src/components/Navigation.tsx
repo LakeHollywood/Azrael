@@ -11,6 +11,7 @@ const sections = [
   { id: 'risk', label: 'Risk Metrics', icon: 'fa-shield-halved' },
   { id: 'artifacts', label: 'Artifacts', icon: 'fa-file-shield' },
   { id: 'azrael', label: 'Azrael Engine', icon: 'fa-skull-crossbones' },
+  { id: 'incident', label: 'Incident Log', icon: 'fa-triangle-exclamation' },
   { id: 'summary', label: 'Summary', icon: 'fa-file-lines' },
 ];
 

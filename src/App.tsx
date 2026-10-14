@@ -4,6 +4,7 @@ import PartnerProfile from './components/PartnerProfile';
 import RiskMetrics from './components/RiskMetrics';
 import ArtifactStatus from './components/ArtifactStatus';
 import AzraelEngine from './components/AzraelEngine';
+import AzraelIncidentLog from './components/AzraelIncidentLog';
 import BriefingSummary from './components/BriefingSummary';
 import Navigation from './components/Navigation';
 
@@ -28,6 +29,7 @@ export default function App() {
         />
         <ArtifactStatus />
         <AzraelEngine />
+        <AzraelIncidentLog />
         <BriefingSummary
           partner={selectedPartner}
           risk={selectedRisk}

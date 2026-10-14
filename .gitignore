@@ -1,5 +1,2 @@
-node_modules/
-.next/
-dist/
-build/
-*.log
+__pycache__/
+*.pyc

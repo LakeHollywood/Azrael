@@ -1,2 +1,5 @@
+node_modules/
+
+# mutmut working directory (regenerated on every CI run)
+mutants/
 __pycache__/
-*.pyc

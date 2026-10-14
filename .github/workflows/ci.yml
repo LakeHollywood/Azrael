@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest hypothesis mutmut
+      - name: Run test suite
+        env:
+          # broken libtmux pytest plugin workaround (also set inside the gate script)
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python -m pytest -q
+
+  mutation-gate:
+    # Constitutional guardrails for the HITL approval gate:
+    #   1. authz changes never evaluate below DUAL_APPROVAL (floor 60)
+    #   2. ApprovalGate modifications always evaluate to RESTRICTED (100)
+    #   3. risk -> policy mapping is monotonic across 0-100
+    # Gate: 0 real surviving mutants AND mutation score >= 95%
+    # (equivalent survivors allowed only on lines pinned with
+    #  `# noqa: MUT-equivalent` / `MUT-internal-callchain`).
+    runs-on: ubuntu-latest
+    needs: python-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest hypothesis mutmut
+      - name: Mutation testing gate (scripts/check_mutants.sh)
+        run: bash scripts/check_mutants.sh
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install and test (vitest)
+        run: |
+          npm ci
+          npm test

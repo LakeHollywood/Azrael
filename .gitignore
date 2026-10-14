@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# mutmut working dirs / caches
+mutants/
+.hypothesis/
+.pytest_cache/

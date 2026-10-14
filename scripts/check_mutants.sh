@@ -81,10 +81,14 @@ TOTAL=$((killed + timeout_ + suspicious + survived_raw + untested))
 # `MUT-internal-callchain`).  Markers on the *source* line are the pinned,
 # reviewable record; unmarked survivors fail the gate.
 # ---------------------------------------------------------------------------
+# NOTE: the results blob is passed as ARGV[1], not stdin.  `python3 - <<EOF`
+# consumes stdin for the script itself, so anything piped/redirected into the
+# interpreter is silently discarded (this previously zeroed out the survivor
+# classification and mis-scored every run).
 python3 - "$RESULTS" <<'PYCLASSIFY' > /tmp/mutclass.$$ || toolfail "survivor classification crashed"
 import json, os, re, sys
 
-results = sys.stdin.read()
+results = sys.argv[1]
 marker = re.compile(r"MUT-(internal-callchain|equivalent)")
 real_survived = 0
 marked_equivalent = 0
@@ -111,9 +115,12 @@ for m in re.finditer(r"([\w./]+)\.risk\.x_(\w+)__mutmut_(\d+): survived", result
     if di is None:
         real_survived += 1
         continue
-    target = ob[di].strip()
+    # Strip the trailing equivalence marker from the mutant-file statement
+    # before matching against the real source, so a line that carries a
+    # marker is not disqualified by its own marker text.
+    target = re.sub(r"#\s*noqa:.*$", "", ob[di]).strip()
     rlines = open(src_path).read().split("\n")
-    hits = [i for i,l in enumerate(rlines) if l.strip() == target]
+    hits = [i for i,l in enumerate(rlines) if re.sub(r"#\s*noqa:.*$", "", l).strip() == target]
     if hits and all(marker.search(rlines[i]) for i in hits):
         marked_equivalent += 1
     else:

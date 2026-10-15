@@ -43,22 +43,27 @@ import ledger_verifier as lv
 def sign_entry(draft: dict, secret: bytes, private_key: Ed25519PrivateKey,
                payload_hash: str | None = None) -> dict:
     entry = dict(draft)
+    payload = lv.payload_of(entry)
+    if payload is None:
+        raise ValueError(
+            "draft has neither a 'payload' nor an 'execution_context' field; "
+            "cannot compute payload_hash (fail closed)")
     if payload_hash is not None:
-        # Anchor an external digest as this entry's execution_context hash.
-        # The draft must already embed the digest in its execution_context
+        # Anchor an external digest as this entry's payload hash.
+        # The draft must already embed the digest in its payload
         # (e.g. snapshot_payload_hash); embedding it here would change the
         # canonicalization and break recomputation, so we only verify.
-        found = lv.compute_payload_hash(entry["execution_context"])
-        anchored = payload_hash in json.dumps(entry["execution_context"])
+        found = lv.compute_payload_hash(payload)
+        anchored = payload_hash in json.dumps(payload)
         if not (found == payload_hash or anchored):
             raise ValueError(
                 f"--payload-hash {payload_hash} is neither the canonical "
-                "digest of the draft's execution_context nor embedded within "
+                "digest of the draft's payload nor embedded within "
                 "it; anchoring would produce an unverifiable entry "
                 "(fail closed)")
         entry["payload_hash"] = payload_hash
     else:
-        entry["payload_hash"] = lv.compute_payload_hash(entry["execution_context"])
+        entry["payload_hash"] = lv.compute_payload_hash(payload)
     entry["current_hash"] = lv.compute_current_hash(
         entry["previous_ledger_hash"], entry["payload_hash"],
         entry["timestamp"], secret)
@@ -139,6 +144,45 @@ def main(argv=None) -> int:
                   "predecessor", file=sys.stderr)
             return 2
 
+    # Data-egress guard (log_export_7732 review): any payload naming a storage
+    # destination must be covered by the nearest APPROVED ancestor's
+    # authorized_targets -- checked at SIGNING time, not just at audit time.
+    targets = lv.extract_targets(lv.payload_of(draft))
+    approved_anc = None
+    if any(t.startswith("storage_bucket:") or t.startswith("object_key:")
+           for t in targets):
+        if predecessor is not None and \
+                predecessor.get("lifecycle_state") == "APPROVED":
+            approved_anc = predecessor
+        elif chain:
+            ordered = sorted(chain, key=lambda e: e.get("timestamp", ""))
+            idx = next((i for i, e in enumerate(ordered)
+                        if e.get("current_hash") == prev_hash), None)
+            if idx is not None:
+                approved_anc = next(
+                    (e for e in reversed(ordered[:idx + 1])
+                     if e.get("lifecycle_state") == "APPROVED"), None)
+        if approved_anc is None:
+            print("::error::draft payload contains data-egress destinations "
+                  f"{targets} but has no APPROVED ancestor in the ledger; "
+                  "export scope cannot be verified (fail closed)",
+                  file=sys.stderr)
+            return 2
+        approval_ctx = approved_anc.get("approval_context")
+        authorized = (approval_ctx.get("authorized_targets")
+                      if isinstance(approval_ctx, dict) else None)
+        if not isinstance(authorized, list) or not authorized:
+            print("::error::APPROVED ancestor lacks a non-empty "
+                  "approval_context.authorized_targets list; export scope "
+                  "cannot be verified (fail closed)", file=sys.stderr)
+            return 2
+        unauthorized = [t for t in targets if t not in authorized]
+        if unauthorized:
+            print("::error::export target(s) outside approved scope: "
+                  f"{unauthorized}; authorized={sorted(authorized)} "
+                  "(signing refused, fail closed)", file=sys.stderr)
+            return 2
+
     try:
         entry = sign_entry(draft, secret, private_key, payload_hash)
     except ValueError as exc:
@@ -149,7 +193,8 @@ def main(argv=None) -> int:
     pub_b64 = base64.urlsafe_b64encode(
         private_key.public_key().public_bytes_raw()).decode()
     errors = lv.verify_entry(entry, secret, pub_b64,
-                             expected_previous_state_entry=predecessor)
+                             expected_previous_state_entry=predecessor,
+                             entries=chain + [entry])
     if errors:
         print("::error::re-issued entry failed verification:", file=sys.stderr)
         for e in errors:

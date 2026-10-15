@@ -367,3 +367,227 @@ class TestReissueAnchoring:
         with pytest.raises(ValueError, match="fail closed"):
             reissue.sign_entry(draft, SECRET, _PRIVKEY,
                                "sha256:" + "e" * 64)
+
+
+# ------------------------------------------- export closure states (log_export_7732)
+
+def make_payload_entry(ledger_id, state, payload, prev_hash, timestamp,
+                       authorized_targets=None, workflow_id="wf_992"):
+    """Signed entry using the newer 'payload' field naming convention."""
+    entry = {
+        "ledger_id": ledger_id,
+        "workflow_id": workflow_id,
+        "lifecycle_state": state,
+        "timestamp": timestamp,
+        "previous_ledger_hash": prev_hash,
+        "payload": payload,
+    }
+    if state == "APPROVED" and authorized_targets is not None:
+        entry["approval_context"] = {"authorized_targets": authorized_targets}
+    entry["payload_hash"] = lv.compute_payload_hash(payload)
+    entry["current_hash"] = lv.compute_current_hash(
+        prev_hash, entry["payload_hash"], timestamp, SECRET)
+    entry["signature"] = _sign(entry["current_hash"])
+    return entry
+
+
+EXPORT_RESULT = {
+    "action": "export_compressed",
+    "requested_by": "agent_x",
+    "approved_by": ["alice_admin", "bob_security"],
+    "export_parameters_hash": "sha256:" + "c3d4" * 16,
+    "result": {
+        "file_size_bytes": 45102933,
+        "record_count": 14502,
+        "storage_bucket": "bizchat-secure-exports",
+        "object_key": "exports/tenant_abc123/export_9912.tar.gz.enc",
+        "encryption_algorithm": "AES-256-GCM",
+    },
+}
+BUCKET_TARGET = "storage_bucket:bizchat-secure-exports"
+KEY_TARGET = "object_key:exports/tenant_abc123/export_9912.tar.gz.enc"
+
+
+class TestExportClosureScope:
+    def test_extract_targets_covers_nested_egress_destinations(self):
+        assert lv.extract_targets(EXPORT_RESULT) == sorted(
+            [BUCKET_TARGET, KEY_TARGET])
+
+    def test_target_keys_found_at_any_depth(self):
+        ctx = {"outer": {"inner": {"target_cluster": "prod-us-east-1"}}}
+        assert lv.extract_targets(ctx) == ["prod-us-east-1"]
+
+    def test_resolved_follows_executing_legally(self):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=[BUCKET_TARGET,
+                                                          KEY_TARGET])
+        executing = make_payload_entry("b", "EXECUTING",
+                                       {"action": "export_start"},
+                                       approved["current_hash"],
+                                       "2026-10-15T15:30:00Z")
+        resolved = make_payload_entry("c", "RESOLVED", EXPORT_RESULT,
+                                      executing["current_hash"],
+                                      "2026-10-15T15:45:00Z")
+        assert lv.verify_chain([approved, executing, resolved],
+                               SECRET, PUB_B64) == []
+
+    def test_resolved_with_unauthorized_bucket_rejected(self):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=["staging-gw-01"])
+        executing = make_payload_entry("b", "EXECUTING",
+                                       {"action": "export_start"},
+                                       approved["current_hash"],
+                                       "2026-10-15T15:30:00Z")
+        leaked = json.loads(json.dumps(EXPORT_RESULT))
+        leaked["result"]["storage_bucket"] = "attacker-controlled-bucket"
+        resolved = make_payload_entry("c", "RESOLVED", leaked,
+                                      executing["current_hash"],
+                                      "2026-10-15T15:45:00Z")
+        errs = lv.verify_chain([approved, executing, resolved],
+                               SECRET, PUB_B64)
+        assert any("outside approved scope" in e and "attacker-controlled-bucket" in e
+                   for e in errs), errs
+
+    def test_resolved_missing_approved_ancestor_fails_closed(self):
+        proposed = make_payload_entry("p", "PROPOSED",
+                                      {"action": "propose_export"}, GENESIS,
+                                      "2026-10-15T15:00:00Z")
+        executing = make_payload_entry("e", "EXECUTING",
+                                       {"action": "export_start"},
+                                       proposed["current_hash"],
+                                       "2026-10-15T15:30:00Z")
+        resolved = make_payload_entry("r", "RESOLVED", EXPORT_RESULT,
+                                      executing["current_hash"],
+                                      "2026-10-15T15:45:00Z")
+        errs = lv.verify_chain([proposed, executing, resolved],
+                               SECRET, PUB_B64)
+        assert any("no APPROVED ancestor" in e for e in errs), errs
+
+    def test_resolved_under_empty_authorized_targets_fails_closed(self):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=[])
+        # make_payload_entry skips approval_context when falsy list; add it.
+        approved["approval_context"] = {"authorized_targets": []}
+        approved["payload_hash"] = lv.compute_payload_hash(approved["payload"])
+        approved["current_hash"] = lv.compute_current_hash(
+            GENESIS, approved["payload_hash"], approved["timestamp"], SECRET)
+        approved["signature"] = _sign(approved["current_hash"])
+        executing = make_payload_entry("e", "EXECUTING",
+                                       {"action": "export_start"},
+                                       approved["current_hash"],
+                                       "2026-10-15T15:30:00Z")
+        resolved = make_payload_entry("r", "RESOLVED", EXPORT_RESULT,
+                                      executing["current_hash"],
+                                      "2026-10-15T15:45:00Z")
+        errs = lv.verify_chain([approved, executing, resolved],
+                               SECRET, PUB_B64)
+        assert any("non-empty" in e for e in errs), errs
+
+    def test_terminal_resolved_state_admits_no_successor(self):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=[BUCKET_TARGET,
+                                                          KEY_TARGET])
+        resolved = make_payload_entry("r", "RESOLVED", EXPORT_RESULT,
+                                      approved["current_hash"],
+                                      "2026-10-15T15:45:00Z")
+        extra = make_payload_entry("x", "EXECUTING",
+                                   {"action": "re-export"},
+                                   resolved["current_hash"],
+                                   "2026-10-15T16:00:00Z")
+        errs = lv.verify_chain([approved, resolved, extra], SECRET, PUB_B64)
+        assert any("illegal transition RESOLVED -> EXECUTING" in e
+                   for e in errs), errs
+
+    def test_submitted_log_export_7732_shape_is_rejected(self):
+        """The as-submitted record: truncated digests + key-name signature."""
+        entry = {
+            "ledger_id": "log_export_7732",
+            "workflow_id": "export_job_9912",
+            "lifecycle_state": "RESOLVED",
+            "timestamp": "2026-10-15T15:45:00Z",
+            "previous_ledger_hash": "sha256:8f7d...",
+            "payload": EXPORT_RESULT,
+            "payload_hash": "sha256:9e8f...",
+            "current_hash": "sha256:1a2b...",
+            "signature": "ed25519:ledger_signing_key...",
+        }
+        errs = lv.verify_entry(entry, SECRET, PUB_B64)
+        assert any("previous_ledger_hash is not a full" in e for e in errs)
+        assert any("payload_hash is not a full" in e for e in errs)
+        assert any("current_hash is not a full" in e for e in errs)
+
+    def test_payload_field_entry_hashes_over_payload_not_execution_context(self):
+        entry = make_payload_entry("z", "PROPOSED", EXPORT_RESULT, GENESIS,
+                                   "2026-10-15T15:00:00Z")
+        assert lv.verify_chain([entry], SECRET, PUB_B64) == []
+        tampered = dict(entry)
+        tampered["payload"] = dict(EXPORT_RESULT, action="export_plain")
+        errs = lv.verify_chain([tampered], SECRET, PUB_B64)
+        assert any("payload_hash mismatch" in e for e in errs), errs
+
+
+class TestReissueEgressGuard:
+    def _files(self, tmp_path, draft, chain):
+        d = tmp_path / "draft.json"; d.write_text(json.dumps(draft))
+        led = tmp_path / "ledger.json"; led.write_text(json.dumps(chain))
+        sec = tmp_path / "secret"; sec.write_bytes(SECRET)
+        key = tmp_path / "key.pem"; key.write_bytes(_PKCS8_KEY)
+        return str(d), str(led), str(sec), str(key)
+
+    def _run(self, tmp_path, draft, chain):
+        d, led, sec, key = self._files(tmp_path, draft, chain)
+        out = str(tmp_path / "out.json")
+        rc = reissue.main(["--draft", d, "--ledger", led,
+                           "--hmac-secret-file", sec,
+                           "--signing-key-file", key, "--out", out])
+        return rc, out
+
+    def _resolved_draft(self, prev_hash):
+        return {"ledger_id": "log_export_7732",
+                "workflow_id": "export_job_9912",
+                "lifecycle_state": "RESOLVED",
+                "timestamp": "2026-10-15T15:45:00Z",
+                "previous_ledger_hash": prev_hash,
+                "payload": EXPORT_RESULT}
+
+    def test_signing_refused_when_bucket_outside_approved_scope(self, tmp_path):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=["staging-gw-01"])
+        rc, out = self._run(tmp_path, self._resolved_draft(
+            approved["current_hash"]), [approved])
+        assert rc == 2
+        assert not (tmp_path / "out.json").exists()
+
+    def test_signing_succeeds_when_egress_targets_enumerated(self, tmp_path):
+        approved = make_payload_entry("a", "APPROVED",
+                                      {"tool_name": "approve"}, GENESIS,
+                                      "2026-10-15T15:00:00Z",
+                                      authorized_targets=[BUCKET_TARGET,
+                                                          KEY_TARGET])
+        executing = make_payload_entry("e", "EXECUTING",
+                                       {"action": "export_start"},
+                                       approved["current_hash"],
+                                       "2026-10-15T15:30:00Z")
+        rc, out = self._run(tmp_path, self._resolved_draft(
+            executing["current_hash"]), [approved, executing])
+        assert rc == 0
+        chain = json.loads(open(out).read())
+        assert lv.verify_chain(chain, SECRET, PUB_B64) == []
+
+    def test_egress_without_approved_ancestor_refused(self, tmp_path):
+        executing = make_payload_entry("e", "EXECUTING",
+                                       {"action": "export_start"}, GENESIS,
+                                       "2026-10-15T15:30:00Z")
+        rc, _ = self._run(tmp_path, self._resolved_draft(
+            executing["current_hash"]), [executing])
+        assert rc == 2

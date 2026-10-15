@@ -52,8 +52,14 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ALLOWED_TRANSITIONS = {
     "PROPOSED": {"APPROVED", "REJECTED"},
     "APPROVED": {"EXECUTING", "ABORTED"},
-    "EXECUTING": {"COMPLETED", "FAILED", "ABORTED"},
+    "EXECUTING": {"COMPLETED", "FAILED", "RESOLVED", "ABORTED"},
+    # COMPLETED / FAILED / RESOLVED / REJECTED / ABORTED are terminal:
+    # absent from the mapping's keys, so nothing may follow them.
 }
+
+# States that close a workflow; no successor entry is legal from these.
+TERMINAL_STATES = frozenset(
+    {"COMPLETED", "FAILED", "RESOLVED", "REJECTED", "ABORTED"})
 
 # A new chain's first entry links to this sentinel instead of a predecessor.
 _GENESIS_HASH = "sha256:" + "0" * 64
@@ -82,36 +88,106 @@ def compute_current_hash(previous_ledger_hash: str, payload_hash: str,
     return "sha256:" + mac
 
 
-def extract_targets(execution_context) -> list[str]:
-    """Pull every target-ish field out of an execution context.
+# Field names that denote WHERE data lands or originates -- these are
+# authorization-relevant just like explicit "target_*" fields.  Export/data-
+# egress payloads (see log_export_7732) name their destination storage_bucket
+# and object_key instead of target_cluster; without this list, such entries
+# would carry zero extracted targets and silently pass the scope check.
+_DESTINATION_FIELD_NAMES = ("storage_bucket", "object_key")
 
-    Keys matching /target/ (e.g. target_cluster, target_gateway) are treated as
-    authorization-relevant so new tools cannot silently bypass scope checks by
-    inventing a differently-named target field.
+
+def _walk_dict_nodes(obj, path=()):
+    """Yield (path, dict) for every nested dict inside obj."""
+    if isinstance(obj, dict):
+        yield path, obj
+        for key, value in obj.items():
+            yield from _walk_dict_nodes(value, path + (key,))
+
+
+def extract_targets(execution_context) -> list[str]:
+    """Pull every authorization-relevant locator out of an execution context.
+
+    Two families of fields are treated as targets so new tools cannot silently
+    bypass scope checks by inventing a differently-named field:
+
+    * Any key matching /target/ at ANY nesting depth (e.g. target_cluster,
+      target_gateway).
+    * Data-egress destinations: keys named ``storage_bucket`` or ``object_key``
+      at any depth (an export writes exactly where those point).  They are
+      returned prefixed (``storage_bucket:<v>`` / ``object_key:<v>``) so an
+      APPROVED predecessor must enumerate authorized values in the same
+      prefixed form -- fail closed on typos or missing declarations.
     """
     targets = []
-    if isinstance(execution_context, dict):
-        for key, value in execution_context.items():
-            if "target" in key.lower():
+    for _path, node in _walk_dict_nodes(execution_context):
+        for key, value in node.items():
+            lname = key.lower()
+            if "target" in lname:
                 if isinstance(value, list):
                     targets.extend(str(v) for v in value)
                 else:
                     targets.append(str(value))
-    return sorted(targets)
+            elif lname in _DESTINATION_FIELD_NAMES:
+                if isinstance(value, list):
+                    targets.extend(f"{lname}:{v}" for v in value)
+                else:
+                    targets.append(f"{lname}:{value}")
+    return sorted(set(targets))
+
+
+def payload_of(entry: dict):
+    """Return an entry's payload in canonical form.
+
+    Newer entries (e.g. log_export_7732) name the field ``payload``; the wf_992
+    convention uses ``execution_context``.  Both are accepted so scope checks
+    cover closure payloads regardless of naming.
+    """
+    if "payload" in entry:
+        return entry["payload"]
+    return entry.get("execution_context")
+
+
+def _find_approved_ancestor(entries: list[dict], entry: dict) -> dict | None:
+    """Nearest APPROVED entry preceding ``entry`` in the chain (by position).
+
+    ``entry`` need not itself be present in ``entries`` (e.g. an unsigned
+    draft): the scan starts at the last entry whose timestamp is strictly
+    earlier than ``entry``'s, or from the end of the list when ``entry`` is
+    absent.  Entries sharing ``entry``'s ledger_id are excluded.
+    """
+    ts = str(entry.get("timestamp", ""))
+    candidates = [e for e in entries
+                  if e.get("ledger_id") != entry.get("ledger_id")
+                  and str(e.get("timestamp", "")) < ts] or list(entries)
+    for e in reversed(candidates):
+        if isinstance(e, dict) and e.get("lifecycle_state") == "APPROVED":
+            return e
+    return None
 
 
 def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
-                 expected_previous_state_entry: dict | None = None) -> list[str]:
-    """Return a list of failure reasons. Empty list == entry is valid."""
+                 expected_previous_state_entry: dict | None = None,
+                 entries: list[dict] | None = None) -> list[str]:
+    """Return a list of failure reasons. Empty list == entry is valid.
+
+    ``entries`` optionally supplies the full chain (oldest first) so closure
+    states (RESOLVED/COMPLETED) can locate their APPROVED ancestor for scope
+    checking; without it that check is skipped here and enforced by
+    verify_chain(), which always passes the list.
+    """
     errors = []
 
     # --- structural checks -------------------------------------------------
     required = ("ledger_id", "workflow_id", "lifecycle_state", "timestamp",
-                "previous_ledger_hash", "execution_context", "payload_hash",
+                "previous_ledger_hash", "payload_hash",
                 "current_hash", "signature")
     for field in required:
         if field not in entry:
             errors.append(f"missing field: {field}")
+    # Payload may be named either way (log_export_7732 uses "payload"; the
+    # wf_992 convention uses "execution_context").  At least one is required.
+    if "payload" not in entry and "execution_context" not in entry:
+        errors.append("missing field: payload (or execution_context)")
     if errors:
         return errors
 
@@ -129,7 +205,9 @@ def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
         return errors  # cannot safely continue
 
     # --- payload hash recomputation ---------------------------------------
-    recomputed_payload = compute_payload_hash(entry["execution_context"])
+    # Convention: payload_hash is the canonical digest of payload_of(entry)
+    # (``payload`` if present, else ``execution_context``).
+    recomputed_payload = compute_payload_hash(payload_of(entry))
     if not hmac.compare_digest(recomputed_payload, entry["payload_hash"]):
         errors.append(f"payload_hash mismatch: recomputed {recomputed_payload} "
                       f"!= declared {entry['payload_hash']}")
@@ -192,6 +270,41 @@ def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
                         "target(s) outside approved scope: "
                         f"{unauthorized}; authorized={sorted(authorized)}")
 
+    # --- closure-state scope check ------------------------------------------
+    # RESOLVED/COMPLETED entries carry the *result* of execution (e.g. an
+    # export's destination bucket).  Their immediate predecessor is usually
+    # EXECUTING, so the prev_state == "APPROVED" branch above never sees them.
+    # A data-egress result naming an unauthorized storage_bucket would slip
+    # through unless we walk back to the nearest APPROVED ancestor and enforce
+    # its authorized_targets over the closure payload too.  Only enforced when
+    # a full-chain context is available (entries); standalone verification of
+    # a single closure entry cannot locate an ancestor, which is why the CI
+    # gate runs verify_chain(), not verify_entry(), whenever possible.
+    if state in ("RESOLVED", "COMPLETED") and entries is not None:
+        approved_ancestor = _find_approved_ancestor(entries, entry)
+        if approved_ancestor is not None:
+            approval_ctx = approved_ancestor.get("approval_context")
+            authorized = (approval_ctx.get("authorized_targets")
+                          if isinstance(approval_ctx, dict) else None)
+            if not isinstance(authorized, list) or not authorized:
+                errors.append(
+                    f"{state} entry's APPROVED ancestor lacks a non-empty "
+                    "approval_context.authorized_targets list; result scope "
+                    "cannot be verified (fail closed)")
+            else:
+                unauthorized = [t for t in extract_targets(payload_of(entry))
+                                if t not in authorized]
+                if unauthorized:
+                    errors.append(
+                        f"{state} result target(s) outside approved scope: "
+                        f"{unauthorized}; authorized={sorted(authorized)}")
+        elif expected_previous_state_entry is not None \
+                and expected_previous_state_entry.get(
+                    "lifecycle_state") != "APPROVED":
+            errors.append(
+                f"{state} entry has no APPROVED ancestor in the chain; "
+                "result scope cannot be verified (fail closed)")
+
     return errors
 
 
@@ -209,7 +322,8 @@ def verify_chain(entries: list[dict], hmac_secret: bytes,
     prev_entry = None
     for i, entry in enumerate(entries):
         errs = verify_entry(entry, hmac_secret, ed25519_pubkey_b64,
-                            expected_previous_state_entry=prev_entry)
+                            expected_previous_state_entry=prev_entry,
+                            entries=entries)
         expected_prev = (prev_entry["current_hash"] if prev_entry
                          else genesis_previous_hash)
         declared_prev = str(entry.get("previous_ledger_hash", ""))

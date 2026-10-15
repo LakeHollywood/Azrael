@@ -1,0 +1,25 @@
+[
+  {
+    "ledger_id": "log_4492",
+    "workflow_id": "wf_992",
+    "lifecycle_state": "PROPOSED",
+    "timestamp": "2026-10-15T14:35:00Z",
+    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "execution_context": {
+      "tenantId": "acme",
+      "accounts": [
+        {
+          "id": "cash",
+          "type": "asset",
+          "balance": {
+            "amount": 100000,
+            "currency": "USD"
+          }
+        }
+      ]
+    },
+    "payload_hash": "sha256:fe41579c9933cf21bf374485da901f7b3a0c42526e55e81500e2054192564d59",
+    "current_hash": "sha256:c6c543d18ca1c76e0c6c887cb481ac963cec272c37f475eed01879aa45a185b1",
+    "signature": "ed25519:ymLq--Q0TcUMJ15g6yCKNDYhra_EgiYMpUHFnUs9zTqexRGzdxmdPMvwCz-SkFDHo3KePoHS-Hv6AsxmXyUrBA=="
+  }
+]

@@ -1,0 +1,24 @@
+{
+  "ledger_id": "log_export_7732",
+  "workflow_id": "export_job_9912",
+  "tenant_id": "tenant_abc123",
+  "lifecycle_state": "RESOLVED",
+  "timestamp": "2026-10-15T15:45:00Z",
+  "previous_ledger_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
+  "payload": {
+    "action": "export_compressed",
+    "requested_by": "agent_x",
+    "approved_by": [
+      "alice_admin",
+      "bob_security"
+    ],
+    "export_parameters_hash": "sha256:c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4",
+    "result": {
+      "file_size_bytes": 45102933,
+      "record_count": 14502,
+      "storage_bucket": "bizchat-secure-exports",
+      "object_key": "exports/tenant_abc123/export_9912.tar.gz.enc",
+      "encryption_algorithm": "AES-256-GCM"
+    }
+  }
+}

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .ledgerdev/
 __pycache__/
+server.log

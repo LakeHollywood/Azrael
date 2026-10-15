@@ -10,7 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  # Repository secret-scanning push protection (server-side mirror of the
+  # local pre-commit hook). Runs first and blocks the compliance gate if any
+  # credential would be merged. Note: true GitHub "push protection" is a repo
+  # setting (Settings → Code security → Secret scanning → Push protection)
+  # available on public repos / Enterprise Cloud; this job provides equivalent
+  # fail-closed enforcement for every plan via scripts/secret_scan.py.
+  secret-scan-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan PR head for secrets (working tree + full history blobs)
+        run: |
+          set -euo pipefail
+          python3 scripts/secret_scan.py --working
+          git fetch --unshallow origin 2>/dev/null || true
+          python3 scripts/secret_scan.py --ref HEAD
+
   audit-verification-gate:
+    needs: secret-scan-gate
     runs-on: ubuntu-latest
     # AUDIT_ID / EXPECTED_HASH are provided as *environment* secrets
     # (Settings → Environments → ledger-audit), so forks and PRs from

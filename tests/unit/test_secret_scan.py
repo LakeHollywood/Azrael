@@ -1,5 +1,6 @@
 """Tests for scripts/secret_scan.py (push-protection scanner)."""
 import base64
+import hashlib
 import os
 import subprocess
 import sys
@@ -30,11 +31,10 @@ class TestDetectors:
         assert _scan_text('api_key = "super-secret-value-1234567890"')
 
     def test_raw_random_b64_secret_detected(self):
-        # Deterministic fixture: 32 random bytes base64-encoded, with any '/'
-        # replaced (the scanner's blob regex only matches [A-Za-z0-9+], so a
-        # slash would split the run; real secrets still decode as binary here).
-        raw = bytes(range(16)) + bytes(reversed(range(16)))
-        blob = base64.b64encode(raw).decode().rstrip("=").replace("/", "q")
+        # Deterministic fixture: sha256 digest base64-encoded (slash-free,
+        # high-entropy, decodes to binary — unlike a sequential byte pattern,
+        # which fails the entropy threshold).
+        blob = base64.b64encode(hashlib.sha256(b"acme").digest()).decode().rstrip("=")
         assert sc.looks_random(blob)
         assert _scan_text(f'LEAKED="{blob}"')
 

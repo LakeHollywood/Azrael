@@ -41,11 +41,20 @@ from scripts.balance_safety_check import balances_from_snapshot  # noqa: E402
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER_FILE = os.path.join(_ROOT, "data", "ledgers", "wf_992.json")
+# Tenant -> ledger file for whole-chain verification via POST /verify.
+# Tenants absent from this map cannot be verified (fail closed).
+TENANT_LEDGER_FILES = {
+    "acme": LEDGER_FILE,
+    "tenant_abc123": os.path.join(_ROOT, "data", "ledgers",
+                                  "export_job_9912.json"),
+}
 ANCHOR_ENTRY_ID = "log_4492"
 DEV_SECRET_FILE = os.path.join(_ROOT, ".ledgerdev", "secret")
 DEV_PUBKEY_FILE = os.path.join(_ROOT, ".ledgerdev", "pub.b64")
 
 VALID_TX_FIELDS = {"id", "accountId", "amount", "description", "unit"}
+# Guard against float64-exactness overflow on absurd magnitudes.
+MAX_DELTA_CENTS = 2 ** 53
 
 
 def parse_route(path: str):
@@ -134,8 +143,12 @@ class LedgerAPI:
             return 400, {"error": "missing_or_invalid_id"}
         if not isinstance(account_id, str) or not account_id:
             return 400, {"error": "missing_or_invalid_accountId"}
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-            return 400, {"error": "amount_must_be_numeric"}
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            # Integer-only at the API boundary: floats invite silent rounding;
+            # fractional major units are handled by the exact-cent check below.
+            return 400, {"error": "amount_must_be_numeric",
+                         "detail": "amount must be an integer in the given "
+                                   "unit (cents for minor, dollars for major)"}
         if unit not in ("major", "minor"):
             return 400, {"error": "unit_must_be_major_or_minor"}
 
@@ -161,13 +174,13 @@ class LedgerAPI:
         # - unit "minor" (default): amount is integer cents -> used directly.
         # - unit "major": amount is dollars -> scaled to cents EXACTLY; a
         #   sub-cent remainder is rejected rather than silently rounded.
-        cents_value = amount * 100 if unit == "major" else amount
-        if cents_value != int(cents_value):
+        delta_cents = amount * 100 if unit == "major" else amount
+        if abs(delta_cents) > MAX_DELTA_CENTS:
             return 400, {"error": "amount_not_exact_in_cents",
-                         "detail": f"{amount} ({unit} units) is not an exact "
-                                   "cent amount; refusing to round silently"}
-        delta_cents = int(cents_value)
-        amount_units = int(amount)
+                         "detail": f"{amount} ({unit} units) overflows the "
+                                   "exact-integer cent range; refusing to "
+                                   "round silently"}
+        amount_units = amount
         post = pre["amount"] + delta_cents  # signed-delta convention, cents
         overdrawn = post < 0
         tx_digest = lv._digest(lv.canonical_json(body))
@@ -233,14 +246,15 @@ class LedgerAPI:
         return status, payload
 
     def verify(self, tenant: str, body: dict):
-        if tenant not in self.audited_tenants:
+        ledger_file = TENANT_LEDGER_FILES.get(tenant)
+        if ledger_file is None:
             return 404, {"error": "unknown_tenant", "tenant": tenant}
         secret, pubkey = _dev_keys()
         if secret is None or pubkey is None:
             return 503, {"verified": False,
                          "error": "verification_keys_unavailable"}
         try:
-            with open(LEDGER_FILE, "r", encoding="utf-8") as fh:
+            with open(ledger_file, "r", encoding="utf-8") as fh:
                 entries = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             return 200, {"verified": False, "error": f"ledger_read_failed: {exc}"}

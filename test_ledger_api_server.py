@@ -89,10 +89,16 @@ def test_minor_major_unit_conversions(api):
 
 
 def test_major_non_whole_dollar_rejected(api):
+    # fractional amounts are rejected outright (integer-only boundary) ...
     status, body = api.post_transaction("acme", {
         "id": "tx-frac", "accountId": "cash", "amount": 10.5, "unit": "major"})
     assert status == 400
-    assert body["error"] == "amount_not_exact_in_cents"
+    assert body["error"] == "amount_must_be_numeric"
+    # ... including in minor units, and floats masquerading as ints are fine
+    # only when they are true integers is not accepted: JSON floats never are.
+    status2, body2 = api.post_transaction("acme", {
+        "id": "tx-frac2", "accountId": "cash", "amount": 100.0, "unit": "minor"})
+    assert status2 == 400 and body2["error"] == "amount_must_be_numeric"
 
 
 def test_unknown_account_fails_closed(api):
@@ -174,12 +180,34 @@ def test_verify_detects_tampered_ledger(tmp_path, monkeypatch):
     chain[0]["execution_context"]["accounts"][0]["balance"]["amount"] = 1
     tampered = tmp_path / "wf_992.json"
     tampered.write_text(json.dumps(chain))
-    monkeypatch.setattr(srv, "LEDGER_FILE", str(tampered))
+    monkeypatch.setattr(srv, "TENANT_LEDGER_FILES",
+                        {**srv.TENANT_LEDGER_FILES, "acme": str(tampered)})
     api = srv.LedgerAPI()
     status, body = api.verify("acme", {})
     assert status == 200
     assert body["verified"] is False
     assert any("payload_hash mismatch" in e for e in body["errors"])
+
+
+def test_verify_export_tenant_chain_passes(api):
+    """tenant_abc123's export chain (APPROVED->EXECUTING->RESOLVED) verifies."""
+    status, body = api.verify("tenant_abc123", {"auditId": "log_export_7732"})
+    assert status == 200
+    assert body["verified"] is True, body.get("errors")
+    assert body["entries_checked"] == 3
+
+
+def test_verify_export_tenant_expected_hash_mismatch(api):
+    status, body = api.verify("tenant_abc123", {
+        "auditId": "log_export_7732", "expectedHash": "sha256:deadbeef"})
+    assert body["verified"] is False
+    assert any("expectedHash mismatch" in e for e in body["errors"])
+
+
+def test_verify_unknown_tenant_fails_closed(api):
+    status, body = api.verify("evilcorp", {})
+    assert status == 404
+    assert body["error"] == "unknown_tenant"
 
 
 def test_transactions_refuse_unverifiable_anchor(tmp_path, monkeypatch, api):

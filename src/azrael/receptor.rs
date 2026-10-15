@@ -129,7 +129,7 @@ pub struct Receptor {
 impl Receptor {
     pub fn new(socket_count: usize) -> Self {
         Self {
-            sockets: vec![None; socket_count],
+            sockets: (0..socket_count).map(|_| None).collect(),
             generations: vec![0; socket_count],
             known_modules: HashMap::new(),
         }
@@ -148,6 +148,11 @@ impl Receptor {
             Some(Some(b)) if b.generation == handle.generation => Some((idx, b)),
             _ => None,
         }
+    }
+
+    /// Inspect the module bound to a live handle (None once unmapped/stale).
+    pub fn bound_module(&self, handle: &ReceptorHandle) -> Option<&str> {
+        self.find_binding(handle).map(|(_, b)| b.module_id.as_str())
     }
 
     /// Convenience wrapper around `dock` that returns the full ABIDE-06
@@ -252,6 +257,7 @@ mod tests {
         assert_eq!(report.authority, AuthorityState::Revoked);
         assert_eq!(r.authority_of(&report.handle), AuthorityState::Revoked);
         assert_eq!(r.topology_state(&report.handle), TopologyState::Docked);
+        assert_eq!(r.bound_module(&report.handle), Some("sail.telemetry"));
     }
 
     #[test]

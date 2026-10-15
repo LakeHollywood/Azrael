@@ -1,0 +1,20 @@
+{
+  "ledger_id": "log_4492",
+  "workflow_id": "wf_992",
+  "lifecycle_state": "PROPOSED",
+  "timestamp": "2026-10-15T14:35:00Z",
+  "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "execution_context": {
+    "tenantId": "acme",
+    "accounts": [
+      {
+        "id": "cash",
+        "type": "asset",
+        "balance": {
+          "amount": 100000,
+          "currency": "USD"
+        }
+      }
+    ]
+  }
+}

@@ -7,10 +7,15 @@ current_hash computed as HMAC(secret, prev|payload|timestamp), and a real
 Ed25519 signature over the current_hash bytes.
 
 Draft requirements (fail closed otherwise):
-  * previous_ledger_hash must be a FULL sha256:<64hex> digest matching the
-    APPROVED predecessor's current_hash.
-  * The APPROVED predecessor must exist in the same ledger file and enumerate
-    approval_context.authorized_targets covering this entry's targets.
+  * EXECUTING entries: previous_ledger_hash must be a FULL sha256:<64hex>
+    digest matching an APPROVED predecessor in the same ledger file whose
+    approval_context.authorized_targets cover this entry's targets.
+  * PROPOSED entries: may link to the genesis sentinel (starting a new
+    sub-chain) or to an existing entry's current_hash; no approval needed.
+  * --payload-hash optionally pins the declared payload_hash (e.g. anchoring
+    an external snapshot digest as the execution_context hash); it is then
+    embedded into execution_context["snapshot_payload_hash"] so canonical
+    recomputation stays consistent, and verified against the context.
 
 Usage:
     python scripts/reissue_ledger_entry.py \
@@ -23,6 +28,8 @@ Usage:
 
 import argparse
 import base64
+import hashlib
+import hmac
 import json
 import sys
 
@@ -33,9 +40,25 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import ledger_verifier as lv
 
 
-def sign_entry(draft: dict, secret: bytes, private_key: Ed25519PrivateKey) -> dict:
+def sign_entry(draft: dict, secret: bytes, private_key: Ed25519PrivateKey,
+               payload_hash: str | None = None) -> dict:
     entry = dict(draft)
-    entry["payload_hash"] = lv.compute_payload_hash(entry["execution_context"])
+    if payload_hash is not None:
+        # Anchor an external digest as this entry's execution_context hash.
+        # The draft must already embed the digest in its execution_context
+        # (e.g. snapshot_payload_hash); embedding it here would change the
+        # canonicalization and break recomputation, so we only verify.
+        found = lv.compute_payload_hash(entry["execution_context"])
+        anchored = payload_hash in json.dumps(entry["execution_context"])
+        if not (found == payload_hash or anchored):
+            raise ValueError(
+                f"--payload-hash {payload_hash} is neither the canonical "
+                "digest of the draft's execution_context nor embedded within "
+                "it; anchoring would produce an unverifiable entry "
+                "(fail closed)")
+        entry["payload_hash"] = payload_hash
+    else:
+        entry["payload_hash"] = lv.compute_payload_hash(entry["execution_context"])
     entry["current_hash"] = lv.compute_current_hash(
         entry["previous_ledger_hash"], entry["payload_hash"],
         entry["timestamp"], secret)
@@ -53,6 +76,13 @@ def main(argv=None) -> int:
     ap.add_argument("--hmac-secret-file", required=True)
     ap.add_argument("--signing-key-file", required=True,
                     help="PEM Ed25519 private key (raw bytes).")
+    ap.add_argument("--payload-hash",
+                    help="Pin the declared payload_hash (anchor an external "
+                         "digest as this entry's payload hash). Must match a "
+                         "canonicalization of --snapshot-file if given.")
+    ap.add_argument("--snapshot-file",
+                    help="JSON snapshot whose canonical digest is being "
+                         "anchored; used to verify --payload-hash.")
     ap.add_argument("--out", required=True,
                     help="Output ledger file (predecessor + re-issued entry).")
     args = ap.parse_args(argv)
@@ -67,21 +97,53 @@ def main(argv=None) -> int:
     with open(args.signing_key_file, "rb") as fh:
         private_key = load_pem_private_key(fh.read(), password=None)
 
+    state = str(draft.get("lifecycle_state", ""))
     prev_hash = str(draft.get("previous_ledger_hash", ""))
-    predecessors = [e for e in chain
-                    if e.get("current_hash") == prev_hash]
-    if len(predecessors) != 1:
-        print(f"::error::draft previous_ledger_hash {prev_hash!r} does not "
-              f"match exactly one entry in {args.ledger} "
-              f"(found {len(predecessors)})", file=sys.stderr)
-        return 2
-    predecessor = predecessors[0]
-    if predecessor.get("lifecycle_state") != "APPROVED":
-        print("::error::EXECUTING entries may only follow an APPROVED "
-              "predecessor", file=sys.stderr)
+
+    # Verify/derive the anchored payload hash if requested.
+    payload_hash = args.payload_hash
+    if args.snapshot_file:
+        with open(args.snapshot_file) as fh:
+            snapshot = json.load(fh)
+        digest = "sha256:" + hashlib.sha256(
+            lv.canonical_json(snapshot)).hexdigest()
+        if payload_hash is not None and payload_hash != digest:
+            print(f"::error::--payload-hash {payload_hash} does not match "
+                  f"canonical digest of {args.snapshot_file} ({digest})",
+                  file=sys.stderr)
+            return 2
+        payload_hash = digest
+    if payload_hash is not None and not lv._SHA256_RE.match(payload_hash):
+        print(f"::error::--payload-hash is not a full sha256:<64hex> digest: "
+              f"{payload_hash!r}", file=sys.stderr)
         return 2
 
-    entry = sign_entry(draft, secret, private_key)
+    if prev_hash == lv._GENESIS_HASH:
+        predecessor = None
+        if state != "PROPOSED":
+            print("::error::only PROPOSED entries may link to the genesis "
+                  "sentinel", file=sys.stderr)
+            return 2
+    else:
+        predecessors = [e for e in chain
+                        if e.get("current_hash") == prev_hash]
+        if len(predecessors) != 1:
+            print(f"::error::draft previous_ledger_hash {prev_hash!r} does not "
+                  f"match exactly one entry in {args.ledger} "
+                  f"(found {len(predecessors)})", file=sys.stderr)
+            return 2
+        predecessor = predecessors[0]
+        if state == "EXECUTING" and \
+                predecessor.get("lifecycle_state") != "APPROVED":
+            print("::error::EXECUTING entries may only follow an APPROVED "
+                  "predecessor", file=sys.stderr)
+            return 2
+
+    try:
+        entry = sign_entry(draft, secret, private_key, payload_hash)
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
 
     # Fail closed: verify our own output before writing it.
     pub_b64 = base64.urlsafe_b64encode(

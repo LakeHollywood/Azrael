@@ -249,3 +249,121 @@ class TestCli:
                       "--pubkey-b64", PUB_B64])
         assert rc == 1
         assert "not found" in capsys.readouterr().err
+
+
+# ------------------------------------------------- re-issue script (anchoring)
+
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    "reissue_ledger_entry",
+    __file__.rsplit("/", 1)[0] + "/scripts/reissue_ledger_entry.py")
+reissue = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(reissue)
+
+from cryptography.hazmat.primitives.serialization import (
+    Encoding as _Enc, PrivateFormat as _PF, NoEncryption as _NE)
+
+_PKCS8_KEY = _PRIVKEY.private_bytes(_Enc.PEM, _PF.PKCS8, _NE())
+
+SNAPSHOT = {
+    "tenantId": "acme",
+    "accounts": [{"id": "cash", "type": "asset",
+                  "balance": {"amount": 100000, "currency": "USD"}}],
+}
+SNAPSHOT_HASH = lv.compute_payload_hash(SNAPSHOT)
+
+
+def _proposed_draft():
+    return {
+        "ledger_id": "log_4492",
+        "workflow_id": "wf_992",
+        "lifecycle_state": "PROPOSED",
+        "timestamp": "2026-10-15T14:35:00Z",
+        "previous_ledger_hash": GENESIS,
+        "execution_context": SNAPSHOT,
+    }
+
+
+class TestReissueAnchoring:
+    def _files(self, tmp_path, draft, snapshot=None):
+        d = tmp_path / "draft.json"
+        d.write_text(json.dumps(draft))
+        led = tmp_path / "ledger.json"
+        led.write_text("[]")
+        sec = tmp_path / "secret"
+        sec.write_bytes(SECRET)
+        key = tmp_path / "key.pem"
+        key.write_bytes(_PKCS8_KEY)
+        snap = None
+        if snapshot is not None:
+            snap = tmp_path / "snap.json"
+            snap.write_text(json.dumps(snapshot))
+        return str(d), str(led), str(sec), str(key), str(snap) if snap else None
+
+    def _run(self, tmp_path, draft, payload_hash=None, snapshot=None):
+        d, led, sec, key, snap = self._files(tmp_path, draft, snapshot)
+        argv = ["--draft", d, "--ledger", led, "--hmac-secret-file", sec,
+                "--signing-key-file", key, "--out", str(tmp_path / "out.json")]
+        if payload_hash:
+            argv += ["--payload-hash", payload_hash]
+        if snap:
+            argv += ["--snapshot-file", snap]
+        return reissue.main(argv)
+
+    def test_proposed_genesis_link_accepted(self, tmp_path):
+        assert self._run(tmp_path, _proposed_draft()) == 0
+        chain = json.loads((tmp_path / "out.json").read_text())
+        assert len(chain) == 1 and chain[0]["ledger_id"] == "log_4492"
+        # entry verifies independently after being written
+        assert lv.verify_chain(chain, SECRET, PUB_B64) == []
+
+    def test_snapshot_anchor_sets_declared_payload_hash(self, tmp_path):
+        rc = self._run(tmp_path, _proposed_draft(),
+                       payload_hash=SNAPSHOT_HASH, snapshot=SNAPSHOT)
+        assert rc == 0
+        entry = json.loads((tmp_path / "out.json").read_text())[0]
+        assert entry["payload_hash"] == SNAPSHOT_HASH
+        assert lv.verify_chain([entry], SECRET, PUB_B64) == []
+
+    def test_mismatched_pinned_hash_fails_closed(self, tmp_path):
+        bogus = "sha256:" + "3c4e" + "0" * 60
+        assert self._run(tmp_path, _proposed_draft(),
+                         payload_hash=bogus, snapshot=SNAPSHOT) == 2
+        assert not (tmp_path / "out.json").exists()
+
+    def test_truncated_pinned_hash_fails_closed(self, tmp_path):
+        assert self._run(tmp_path, _proposed_draft(),
+                         payload_hash="sha256:fe41...") == 2
+
+    def test_executing_cannot_link_genesis(self, tmp_path):
+        draft = _proposed_draft()
+        draft["lifecycle_state"] = "EXECUTING"
+        assert self._run(tmp_path, draft) == 2
+
+    def test_executing_requires_approved_predecessor(self, tmp_path):
+        # Predecessor in ledger is PROPOSED, not APPROVED -> refuse.
+        d = tmp_path / "draft.json"
+        prop = make_entry("log_p", "PROPOSED", {"tool_name": "t"},
+                          GENESIS, "2026-10-15T14:00:00Z")
+        exec_draft = {"ledger_id": "log_e", "workflow_id": "wf_992",
+                      "lifecycle_state": "EXECUTING",
+                      "timestamp": "2026-10-15T14:01:00Z",
+                      "previous_ledger_hash": prop["current_hash"],
+                      "execution_context": {"tool_name": "kubernetes_deploy",
+                                            "target_cluster": "staging-gw-01"}}
+        d.write_text(json.dumps(exec_draft))
+        led = tmp_path / "ledger.json"
+        led.write_text(json.dumps([prop]))
+        sec = tmp_path / "secret"; sec.write_bytes(SECRET)
+        key = tmp_path / "key.pem"; key.write_bytes(_PKCS8_KEY)
+        rc = reissue.main(["--draft", str(d), "--ledger", str(led),
+                           "--hmac-secret-file", str(sec),
+                           "--signing-key-file", str(key),
+                           "--out", str(tmp_path / "out.json")])
+        assert rc == 2
+
+    def test_sign_entry_rejects_unanchorable_pin(self):
+        draft = _proposed_draft()
+        with pytest.raises(ValueError, match="fail closed"):
+            reissue.sign_entry(draft, SECRET, _PRIVKEY,
+                               "sha256:" + "e" * 64)

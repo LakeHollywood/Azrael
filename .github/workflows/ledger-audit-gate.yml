@@ -1,0 +1,116 @@
+name: Ledger Audit Compliance Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+# Fail-closed defaults: least-privilege token, no access to repo secrets
+# unless the environment explicitly grants them.
+permissions:
+  contents: read
+
+jobs:
+  audit-verification-gate:
+    runs-on: ubuntu-latest
+    # AUDIT_ID / EXPECTED_HASH are provided as *environment* secrets
+    # (Settings → Environments → ledger-audit), so forks and PRs from
+    # outside collaborators cannot read them.
+    environment: ledger-audit
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # PRE-EXECUTION GATE (wf_992 remediation): verify the pending ledger
+      # entry locally with ledger_verifier.verify_entry() -- full digests,
+      # canonical payload hashing, HMAC chain link, real ed25519 signature,
+      # legal lifecycle transition, and APPROVED-predecessor target scope.
+      # Runs BEFORE the remote audit call so an out-of-scope or tampered
+      # entry fails the PR even if the remote service would accept it.
+      # ------------------------------------------------------------------
+      - name: Verify Ledger Entry Pre-Execution (ledger_verifier.verify_entry)
+        env:
+          LEDGER_ENTRY_ID: ${{ vars.LEDGER_ENTRY_ID }}
+          LEDGER_FILE: ${{ vars.LEDGER_FILE || 'data/ledgers/pending.json' }}
+          LEDGER_HMAC_SECRET_B64: ${{ secrets.LEDGER_HMAC_SECRET_B64 }}
+          LEDGER_ED25519_PUBKEY_B64: ${{ vars.LEDGER_ED25519_PUBKEY_B64 }}
+        run: |
+          set -euo pipefail
+
+          for v in LEDGER_ENTRY_ID LEDGER_HMAC_SECRET_B64 LEDGER_ED25519_PUBKEY_B64; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is not set (vars/secrets for environment 'ledger-audit'). Failing closed."
+              exit 1
+            fi
+          done
+          if [ ! -f "$LEDGER_FILE" ]; then
+            echo "::error::ledger file $LEDGER_FILE not found; nothing to verify. Failing closed."
+            exit 1
+          fi
+
+          python - <<'PYEOF'
+          import base64, os, sys
+          sys.path.insert(0, os.getcwd())
+          from ledger_verifier import main as ledger_main
+          secret_file = "/tmp/ledger_hmac.key"
+          with open(secret_file, "wb") as fh:
+              fh.write(base64.b64decode(os.environ["LEDGER_HMAC_SECRET_B64"]))
+          rc = ledger_main([
+              "verify-ledger",
+              "--ledger", os.environ["LEDGER_FILE"],
+              "--entry-id", os.environ["LEDGER_ENTRY_ID"],
+              "--hmac-secret-file", secret_file,
+              "--pubkey-b64", os.environ["LEDGER_ED25519_PUBKEY_B64"],
+          ])
+          sys.exit(rc)
+          PYEOF
+          rm -f /tmp/ledger_hmac.key
+
+      # Unit tests for the verifier itself: the gate must not pass on a PR
+      # that breaks the code doing the checking.
+      - name: Setup Python & Test Verifier Logic
+        run: |
+          python -m pip install --quiet cryptography pytest hypothesis
+          python -m pytest test_ledger_verifier.py -q -p no:cacheprovider
+
+      - name: Verify Audit Log Integrity
+        env:
+          # Configurable via repo/group variables; default targets the
+          # in-cluster service rather than localhost (which has no listener
+          # on a GitHub-hosted runner).
+          LEDGER_HOST: ${{ vars.LEDGER_HOST || 'https://ledger.internal' }}
+          TENANT_ID: "acme"
+          AUDIT_ID: ${{ secrets.AUDIT_ID }}
+          EXPECTED_HASH: ${{ secrets.EXPECTED_HASH }}
+        run: |
+          set -euo pipefail
+
+          # --- Input validation (fail closed) ---------------------------
+          if [ -z "${AUDIT_ID:-}" ] || [ -z "${EXPECTED_HASH:-}" ]; then
+            echo "::error::AUDIT_ID or EXPECTED_HASH secret is not set for this environment."
+            exit 1
+          fi
+          case "$LEDGER_HOST" in
+            https://*) ;;
+            *) echo "::error::LEDGER_HOST must be an https:// URL (got '$LEDGER_HOST')."; exit 1 ;;
+          esac
+
+          echo "Executing cryptographic verification for audit log..."
+
+          # Single request body; --fail-with-body surfaces server errors in logs.
+          response=$(curl --fail-with-body -sS --max-time 30 \
+            -X POST "$LEDGER_HOST/api/v1/processors/$TENANT_ID/verify" \
+            -H "Content-Type: application/json" \
+            -d "{\"auditId\":\"$AUDIT_ID\",\"expectedHash\":\"$EXPECTED_HASH\"}")
+
+          # --- Response validation ---------------------------------------
+          # curl -f only catches HTTP >= 400. The verify endpoint can answer
+          # 200 with {"verified": false}; treat that as a gate failure too.
+          verified=$(printf '%s' "$response" | jq -r '.verified // false')
+          if [ "$verified" != "true" ]; then
+            echo "::error::Ledger verification failed for audit id $AUDIT_ID: $response"
+            exit 1
+          fi
+
+          echo "Compliance gate passed successfully!"

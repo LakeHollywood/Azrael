@@ -1,0 +1,16 @@
+# SAIL / AZRAEL Telemetry Daemon configuration
+# Referenced by systemd/sail_telemetry.service:
+#   ExecStart=/usr/local/bin/sail_telemetry_daemon --config /etc/sail/config.toml
+
+# Ping cadence (seconds). MUST be strictly less than the unit's WatchdogSec=10s
+# or systemd will kill the daemon between WATCHDOG=1 pings. The loader rejects
+# out-of-range values at startup.
+watchdog_interval_seconds = 5.0
+http_timeout_seconds = 3.0
+
+db_path = "/var/run/sail/telemetry_buffer.db"
+log_path = "/var/log/sail/ingestion.log"
+
+[endpoints]
+GOES_MAG = "https://services.swpc.noaa.gov/json/goes/primary/magnetometers-7-day.json"
+DSCOVR_MAG = "https://services.swpc.noaa.gov/json/dscovr/dscovr_mag_1s.json"

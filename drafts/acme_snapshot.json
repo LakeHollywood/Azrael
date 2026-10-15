@@ -1,0 +1,13 @@
+{
+  "tenantId": "acme",
+  "accounts": [
+    {
+      "id": "cash",
+      "type": "asset",
+      "balance": {
+        "amount": 100000,
+        "currency": "USD"
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+[
+  {
+    "ledger_id": "log_export_approval_7730",
+    "workflow_id": "export_job_9912",
+    "tenant_id": "tenant_abc123",
+    "lifecycle_state": "APPROVED",
+    "timestamp": "2026-10-15T15:25:00Z",
+    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "execution_context": {
+      "tool_name": "export_approval_grant",
+      "job_id": "export_job_9912"
+    },
+    "approval_context": {
+      "authorized_targets": [
+        "object_key:exports/tenant_abc123/export_9912.tar.gz.enc",
+        "storage_bucket:bizchat-secure-exports"
+      ]
+    },
+    "payload_hash": "sha256:3a50e3088f9334169161d32342bdc46a5023cc57e6107cdb3dbf10b3e3394985",
+    "current_hash": "sha256:e28421d282666a1e8795797cf393fac2bc7ba2527f9a7c5522308df8be3967f8",
+    "signature": "ed25519:h9anN8iUn7uOmXteTJSnRnv3f0P6Via4a-BIWuoKb-U_0_5h5xNFHe3GR1qhUKkVJzEIgD8X6kZnLsLhG1RjBQ=="
+  },
+  {
+    "ledger_id": "log_export_executing_7731",
+    "workflow_id": "export_job_9912",
+    "tenant_id": "tenant_abc123",
+    "lifecycle_state": "EXECUTING",
+    "timestamp": "2026-10-15T15:30:00Z",
+    "previous_ledger_hash": "sha256:e28421d282666a1e8795797cf393fac2bc7ba2527f9a7c5522308df8be3967f8",
+    "payload": {
+      "action": "export_start",
+      "job_id": "export_job_9912",
+      "requested_by": "agent_x"
+    },
+    "payload_hash": "sha256:312e7a30006c73b10895c84699def26e9008f65a6cdab0606d556d6969379642",
+    "current_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
+    "signature": "ed25519:5tEZMS2I3EDJwGa9CE_3JjdIDwQ0SVgC0TEen-c0UfebhpRB0Gl4mAXJBUQaelSDbnZpLXsiLkAJcVHbsuWwCQ=="
+  },
+  {
+    "ledger_id": "log_export_7732",
+    "workflow_id": "export_job_9912",
+    "tenant_id": "tenant_abc123",
+    "lifecycle_state": "RESOLVED",
+    "timestamp": "2026-10-15T15:45:00Z",
+    "previous_ledger_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
+    "payload": {
+      "action": "export_compressed",
+      "requested_by": "agent_x",
+      "approved_by": [
+        "alice_admin",
+        "bob_security"
+      ],
+      "export_parameters_hash": "sha256:c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4c3d4",
+      "result": {
+        "file_size_bytes": 45102933,
+        "record_count": 14502,
+        "storage_bucket": "bizchat-secure-exports",
+        "object_key": "exports/tenant_abc123/export_9912.tar.gz.enc",
+        "encryption_algorithm": "AES-256-GCM"
+      }
+    },
+    "payload_hash": "sha256:c7f2d9500dc1940560d71a4ec31f061fcb8770f2ed7f8cd84d15ae006657d629",
+    "current_hash": "sha256:22615fb0da972129ca7839a886748f1e3e2738dde294fdd4525c1db24240a331",
+    "signature": "ed25519:obwTdb6SkoTxLA_TuCkMOYHhaT3u7DJiLJo1o1Uf1ST5VDWZBYxZctoj4SX_x4ze4Sq19GZKZqHfz1UJd-h6Bg=="
+  }
+]

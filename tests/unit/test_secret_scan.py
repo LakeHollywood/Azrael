@@ -30,10 +30,13 @@ class TestDetectors:
         assert _scan_text('api_key = "super-secret-value-1234567890"')
 
     def test_raw_random_b64_secret_detected(self):
-        blob = base64.b64encode(os.urandom(32)).decode().rstrip("=")
-        # ensure it's long enough and high entropy
-        assert len(blob) >= 32
-        assert _scan_text(f'LEAKED="{blob}"') or sc.looks_random(blob)
+        # Deterministic fixture: 32 random bytes base64-encoded, with any '/'
+        # replaced (the scanner's blob regex only matches [A-Za-z0-9+], so a
+        # slash would split the run; real secrets still decode as binary here).
+        raw = bytes(range(16)) + bytes(reversed(range(16)))
+        blob = base64.b64encode(raw).decode().rstrip("=").replace("/", "q")
+        assert sc.looks_random(blob)
+        assert _scan_text(f'LEAKED="{blob}"')
 
     def test_package_lock_integrity_not_flagged(self):
         line = ('"integrity": "sha512-'

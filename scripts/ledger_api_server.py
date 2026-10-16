@@ -35,9 +35,44 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ledger_verifier as lv  # noqa: E402
-from approval_gate.risk import determine_policy, apply_overrides  # noqa: E402
+from approval_gate.risk import (  # noqa: E402
+    apply_overrides,
+    create_approval_record,
+    determine_policy,
+)
+from audit_log import get_logger  # noqa: E402
+from task_runner import (  # noqa: E402
+    Agent,
+    AgentState,
+    ApprovalRequired,
+    Task,
+    TaskPolicy,
+    TaskStatus,
+)
 from velocity_monitor import VelocityMonitor  # noqa: E402
 from scripts.balance_safety_check import balances_from_snapshot  # noqa: E402
+
+
+def _audit(event_type: str, *, tenant=None, outcome="info", actor="system",
+           resource=None, details=None):
+    """Best-effort structured audit record (never breaks the request path)."""
+    try:
+        get_logger().log_event(event_type, actor=actor, outcome=outcome,
+                               tenant=tenant, resource=resource,
+                               details=details)
+    except Exception as exc:  # pragma: no cover - defensive
+        sys.stderr.write(f"[ledger-api] audit write failed: {exc}\n")
+
+
+# Result fields mirrored into audit records (compact; never log full bodies).
+_AUDIT_TX_FIELDS = ("tx_id", "account", "tx_payload_hash", "delta_cents",
+                    "balance_before_cents", "balance_after_cents",
+                    "effective_risk_score", "approval_policy_required",
+                    "velocity_admission", "description")
+
+
+def _audit_tx_fields(result: dict) -> dict:
+    return {k: result[k] for k in _AUDIT_TX_FIELDS if k in result}
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER_FILE = os.path.join(_ROOT, "data", "ledgers", "wf_992.json")
@@ -119,16 +154,132 @@ def _dev_keys():
 
 
 class LedgerAPI:
+    """The ledger control-plane AGENT.
+
+    Agent/task separation (see task_runner.py): this class owns identity,
+    lifecycle, shared state (Redis backend, velocity monitor, idempotency
+    cache) and supervision/audit — i.e. *who* runs and *whether* it may run.
+    The actual request-time work lives in discrete TASKS:
+
+      ``admit-transaction``  one transaction admission (balance/risk/velocity)
+      ``verify-chain``       one whole-ledger verification pass
+
+    Handlers below are thin adapters: they parse/validate the HTTP-facing
+    contract (status codes unchanged), then execute the corresponding Task
+    through the agent, which enforces fail-closed policy (unknown tenant,
+    unregistered task, stopped agent => refused before execution) and writes
+    the correlated audit records.
+    """
+
+    #: per-request wall-clock bound for admission tasks; a hung Redis or
+    #: snapshot read must surface as TIMED_OUT, never wedge the handler.
+    TX_TIMEOUT_SECONDS = 5.0
+    VERIFY_TIMEOUT_SECONDS = 15.0
+
     def __init__(self):
         self.redis, self.redis_backend = _get_redis()
         self.monitor = VelocityMonitor(self.redis)
         self.tx_cache = {}          # tx-id -> cached verdict (idempotency)
         self.audited_tenants = {"acme"}
+        self.agent = Agent(
+            "ledger-api",
+            name="Ledger Control-Plane Agent",
+            roles=("ledger", "hitl-gate"),
+            metadata={"redis_backend": self.redis_backend},
+        )
+        self.agent.register(
+            Task("admit-transaction", self._task_admit_transaction,
+                 gate=self._gate_known_tenant,
+                 policy=TaskPolicy(timeout_seconds=self.TX_TIMEOUT_SECONDS),
+                 description="Admit/reject one transaction at request time"),
+            Task("verify-chain", self._task_verify_chain,
+                 gate=self._gate_verifiable_tenant,
+                 policy=TaskPolicy(timeout_seconds=self.VERIFY_TIMEOUT_SECONDS),
+                 description="Recompute payload hashes and walk one ledger chain"),
+        )
+        self.agent.start()
+
+    # -- fail-closed gates ---------------------------------------------------
+
+    @staticmethod
+    def _gate_known_tenant(t: Task, kwargs: dict) -> None:
+        """Refuse unknown tenants before any task code runs (fail closed)."""
+        api, tenant = kwargs["api"], kwargs["tenant"]
+        if tenant not in api.audited_tenants:
+            raise ApprovalRequired(f"unknown_tenant:{tenant}")
+
+    @staticmethod
+    def _gate_verifiable_tenant(t: Task, kwargs: dict) -> None:
+        api, tenant = kwargs["api"], kwargs["tenant"]
+        if tenant not in TENANT_LEDGER_FILES:
+            raise ApprovalRequired(f"unknown_tenant:{tenant}")
+
+    # -- task bodies ----------------------------------------------------------
+
+    def _task_admit_transaction(self, *, api: "LedgerAPI", tenant: str,
+                                body: dict) -> tuple:
+        return api._admit_transaction(tenant, body)
+
+    def _task_verify_chain(self, *, api: "LedgerAPI", tenant: str,
+                           body: dict) -> tuple:
+        return api._verify_impl(tenant, body)
+
+    # -- task execution helper --------------------------------------------------
+
+    def _execute(self, task_name: str, **kwargs) -> tuple:
+        """Run a registered task via the agent; map TaskResult to HTTP pair.
+
+        Returns (status, payload). Policy/crash outcomes that would escape
+        the old direct-call path are mapped onto the same status codes the
+        API has always returned, so client behaviour is unchanged while the
+        execution now flows through the audited task boundary.
+        """
+        res = self.agent.run_task(task_name, api=self, **kwargs)
+        if res.ok:
+            status, payload = res.output
+            return status, payload
+        if res.status is TaskStatus.REJECTED:
+            # Gate refusal: keep the historical response shape.
+            if "unknown_tenant" in (res.error or ""):
+                tenant = kwargs.get("tenant")
+                _audit("tx.rejected" if task_name == "admit-transaction"
+                       else "verify.rejected",
+                       tenant=tenant, outcome="rejected",
+                       resource=task_name.split("-")[0],
+                       details={"error": "unknown_tenant"})
+                key = ("unknown_tenant" if task_name == "admit-transaction"
+                       else "unknown_tenant")
+                payload = {"error": key, "tenant": kwargs.get("tenant")}
+                return (404, payload)
+            return 403, {"error": "task_rejected",
+                         "detail": res.error, "task": res.as_dict()}
+        if res.status is TaskStatus.TIMED_OUT:
+            return 503, {"error": "task_timeout",
+                         "detail": res.error, "task": res.as_dict()}
+        if res.status is TaskStatus.SKIPPED:
+            return 503, {"error": "agent_not_running",
+                         "detail": res.error, "task": res.as_dict()}
+        # FAILED: task body raised — same fail-closed posture as a 500.
+        return 500, {"error": "internal", "detail": res.error,
+                     "task": res.as_dict()}
+
+    def health(self) -> dict:
+        """Agent health surfaced on /healthz (separate from task results)."""
+        h = self.agent.health()
+        h["redis_backend"] = self.redis_backend
+        return h
+
+    # -- endpoints (thin adapters over tasks) ------------------------------------
 
     def post_transaction(self, tenant: str, body: dict):
-        if tenant not in self.audited_tenants:
-            return 404, {"error": "unknown_tenant", "tenant": tenant}
+        return self._execute("admit-transaction", tenant=tenant, body=body)
 
+    def verify(self, tenant: str, body: dict):
+        return self._execute("verify-chain", tenant=tenant, body=body)
+
+    # -- original implementations, now task bodies -------------------------------
+
+    def _admit_transaction(self, tenant: str, body: dict):
         extra = set(body) - VALID_TX_FIELDS
         if extra:
             return 400, {"error": "unexpected_fields", "fields": sorted(extra)}
@@ -156,6 +307,9 @@ class LedgerAPI:
             cached = dict(self.tx_cache[tx_id])
             status = cached.pop("_status")
             cached["duplicate"] = True
+            _audit("tx.duplicate", tenant=tenant, outcome="cached",
+                   resource="transactions",
+                   details={"tx_id": tx_id, "cached_status": status})
             return status, cached
 
         anchor, balances = _load_anchor()
@@ -226,6 +380,9 @@ class LedgerAPI:
             status, payload = 402, {**result, "verdict": "OVERDRAFT_BLOCKED",
                                     "velocity_admission": "NOT_ATTEMPTED",
                                     "error": "overdraft_blocked"}
+            _audit("tx.overdraft_blocked", tenant=tenant, outcome="blocked",
+                   resource="transactions", actor=description or "system",
+                   details=_audit_tx_fields(result))
         else:
             admitted = self.monitor.check_velocity(f"processor:{tenant}",
                                                    velocity_cost)
@@ -234,6 +391,9 @@ class LedgerAPI:
                 status, payload = 429, {**result,
                                         "verdict": "BALANCE_SAFE",
                                         "error": "velocity_exceeded"}
+                _audit("tx.velocity_throttled", tenant=tenant,
+                       outcome="throttled", resource="transactions",
+                       details=_audit_tx_fields(result))
             else:
                 # Balance-safe AND velocity-admitted, but still held PROPOSED:
                 # approval gate must clear before execution.
@@ -242,22 +402,53 @@ class LedgerAPI:
                     "state": "PROPOSED_AWAITING_APPROVAL",
                     "note": "approval required before EXECUTING ledger entry",
                 }
+                approval_record = create_approval_record(
+                    effective_score, operation=f"tx:{tx_id}",
+                    actor=description or "system",
+                    extra={"tenant": tenant, "account": account_id,
+                           "tx_payload_hash": tx_digest})
+                _audit("tx.proposed", tenant=tenant, outcome="proposed",
+                       resource="transactions",
+                       details={**_audit_tx_fields(result),
+                               "approval_record_id":
+                                   approval_record["record_id"],
+                               "approval_policy":
+                                   approval_record["approval_policy"]})
         self.tx_cache[tx_id] = {"_status": status, **payload}
         return status, payload
 
-    def verify(self, tenant: str, body: dict):
+    def _verify_impl(self, tenant: str, body: dict):
         ledger_file = TENANT_LEDGER_FILES.get(tenant)
         if ledger_file is None:
+            # Defensive: the gate already refuses unknown tenants (fail
+            # closed before execution); this keeps the direct-call path safe.
+            _audit("verify.rejected", tenant=tenant, outcome="rejected",
+                   resource="verify", details={"error": "unknown_tenant"})
             return 404, {"error": "unknown_tenant", "tenant": tenant}
+        # Verification responses always use the same contract:
+        #   {"verified": bool, "errors": [str, ...], "entries_checked": int}
+        # with HTTP 200 whenever a verdict was produced (including failure
+        # verdicts). 503 is reserved for transport-level unavailability only.
         secret, pubkey = _dev_keys()
         if secret is None or pubkey is None:
+            _audit("verify.unavailable", tenant=tenant, outcome="unavailable",
+                   resource="verify",
+                   details={"error": "verification_keys_unavailable"})
             return 503, {"verified": False,
-                         "error": "verification_keys_unavailable"}
+                         "errors": ["verification_keys_unavailable: dev key "
+                                    "material missing (.ledgerdev/secret and "
+                                    ".ledgerdev/pub.b64); generate with "
+                                    "scripts/generate_dev_ledger_keys.py"],
+                         "entries_checked": 0}
         try:
             with open(ledger_file, "r", encoding="utf-8") as fh:
                 entries = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
-            return 200, {"verified": False, "error": f"ledger_read_failed: {exc}"}
+            _audit("verify.ledger_read_failed", tenant=tenant,
+                   outcome="error", resource="verify", details={"error": str(exc)})
+            return 200, {"verified": False,
+                         "errors": [f"ledger_read_failed: {exc}"],
+                         "entries_checked": 0}
         errors = lv.verify_chain(entries, secret, pubkey)
         entry_id = body.get("auditId")
         expected = body.get("expectedHash")
@@ -265,12 +456,18 @@ class LedgerAPI:
             match = next((e for e in entries
                           if e.get("ledger_id") == entry_id), None)
             if match is None:
-                errors.append(f"auditId {entry_id!r} not found in ledger")
+                errors.append(f"Audit ID '{entry_id}' not found")
             elif expected is not None and match.get("current_hash") != expected:
                 errors.append(
                     f"expectedHash mismatch for {entry_id}: "
                     f"{expected!r} != {match.get('current_hash')!r}")
-        return 200, {"verified": not errors, "errors": errors,
+        verified = not errors
+        _audit("verify.chain_passed" if verified else "verify.chain_failed",
+               tenant=tenant, outcome="verified" if verified else "failed",
+               resource="verify",
+               details={"entries_checked": len(entries),
+                        "audit_id": entry_id, "errors": errors})
+        return 200, {"verified": verified, "errors": errors,
                      "entries_checked": len(entries)}
 
 
@@ -356,10 +553,18 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(os.environ.get("PORT", "3000"))
     api = get_api()
+    _audit("server.starting", resource="lifecycle", outcome="starting",
+           details={"port": port, "redis_backend": api.redis_backend,
+                    "audit_log_file": get_logger().path})
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"ledger-api listening on 127.0.0.1:{port} "
           f"(redis={api.redis_backend})", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        _audit("server.stopped", resource="lifecycle", outcome="stopped",
+               details={"port": port})
+        raise
 
 
 if __name__ == "__main__":

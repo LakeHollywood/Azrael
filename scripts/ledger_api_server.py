@@ -27,6 +27,7 @@ Design notes:
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import os
@@ -49,6 +50,11 @@ TENANT_LEDGER_FILES = {
                                   "export_job_9912.json"),
 }
 ANCHOR_ENTRY_ID = "log_4492"
+# Verification keys are out-of-band trust material and must never be
+# committed (see scripts/secret_scan.py deny list).  Preferred source is the
+# environment; the .ledgerdev/ directory is the local dev fallback.
+ENV_HMAC_SECRET_B64 = "LEDGER_HMAC_SECRET_B64"
+ENV_PUBKEY_B64 = "LEDGER_ED25519_PUBKEY_B64"
 DEV_SECRET_FILE = os.path.join(_ROOT, ".ledgerdev", "secret")
 DEV_PUBKEY_FILE = os.path.join(_ROOT, ".ledgerdev", "pub.b64")
 
@@ -107,7 +113,20 @@ def _load_anchor():
     return entry, balances_from_snapshot(entry["execution_context"])
 
 
-def _dev_keys():
+def _verification_keys():
+    """Return (hmac_secret_bytes, ed25519_pubkey_b64) or (None, None).
+
+    Resolution order: environment variables first (production/CI), then the
+    gitignored .ledgerdev/ files (local development).  Fail closed: callers
+    must refuse verification when either half is missing.
+    """
+    secret_b64 = os.environ.get(ENV_HMAC_SECRET_B64)
+    pubkey = os.environ.get(ENV_PUBKEY_B64)
+    if secret_b64 or pubkey:
+        try:
+            return base64.b64decode(secret_b64), (pubkey or "").strip()
+        except Exception:
+            return None, None
     try:
         with open(DEV_SECRET_FILE, "rb") as fh:
             secret = fh.read().strip()
@@ -249,7 +268,7 @@ class LedgerAPI:
         ledger_file = TENANT_LEDGER_FILES.get(tenant)
         if ledger_file is None:
             return 404, {"error": "unknown_tenant", "tenant": tenant}
-        secret, pubkey = _dev_keys()
+        secret, pubkey = _verification_keys()
         if secret is None or pubkey is None:
             return 503, {"verified": False,
                          "error": "verification_keys_unavailable"}

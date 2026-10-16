@@ -425,20 +425,30 @@ class LedgerAPI:
             _audit("verify.rejected", tenant=tenant, outcome="rejected",
                    resource="verify", details={"error": "unknown_tenant"})
             return 404, {"error": "unknown_tenant", "tenant": tenant}
+        # Verification responses always use the same contract:
+        #   {"verified": bool, "errors": [str, ...], "entries_checked": int}
+        # with HTTP 200 whenever a verdict was produced (including failure
+        # verdicts). 503 is reserved for transport-level unavailability only.
         secret, pubkey = _dev_keys()
         if secret is None or pubkey is None:
             _audit("verify.unavailable", tenant=tenant, outcome="unavailable",
                    resource="verify",
                    details={"error": "verification_keys_unavailable"})
             return 503, {"verified": False,
-                         "error": "verification_keys_unavailable"}
+                         "errors": ["verification_keys_unavailable: dev key "
+                                    "material missing (.ledgerdev/secret and "
+                                    ".ledgerdev/pub.b64); generate with "
+                                    "scripts/generate_dev_ledger_keys.py"],
+                         "entries_checked": 0}
         try:
             with open(ledger_file, "r", encoding="utf-8") as fh:
                 entries = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             _audit("verify.ledger_read_failed", tenant=tenant,
                    outcome="error", resource="verify", details={"error": str(exc)})
-            return 200, {"verified": False, "error": f"ledger_read_failed: {exc}"}
+            return 200, {"verified": False,
+                         "errors": [f"ledger_read_failed: {exc}"],
+                         "entries_checked": 0}
         errors = lv.verify_chain(entries, secret, pubkey)
         entry_id = body.get("auditId")
         expected = body.get("expectedHash")
@@ -446,7 +456,7 @@ class LedgerAPI:
             match = next((e for e in entries
                           if e.get("ledger_id") == entry_id), None)
             if match is None:
-                errors.append(f"auditId {entry_id!r} not found in ledger")
+                errors.append(f"Audit ID '{entry_id}' not found")
             elif expected is not None and match.get("current_hash") != expected:
                 errors.append(
                     f"expectedHash mismatch for {entry_id}: "

@@ -17,8 +17,8 @@
       ]
     },
     "payload_hash": "sha256:3a50e3088f9334169161d32342bdc46a5023cc57e6107cdb3dbf10b3e3394985",
-    "current_hash": "sha256:e28421d282666a1e8795797cf393fac2bc7ba2527f9a7c5522308df8be3967f8",
-    "signature": "ed25519:h9anN8iUn7uOmXteTJSnRnv3f0P6Via4a-BIWuoKb-U_0_5h5xNFHe3GR1qhUKkVJzEIgD8X6kZnLsLhG1RjBQ=="
+    "current_hash": "sha256:ca65feabda07a361e9def32fc7f107b7b690bb29de3c08de32cca27a6f1ce39a",
+    "signature": "ed25519:w8XsvehY82Iati82Q4P781o30XgeAl6P-vs94qMrCpGy9pccg6MijQZ42y1poaa92xUbeFzZjAVQc6pa7QnHAA=="
   },
   {
     "ledger_id": "log_export_executing_7731",
@@ -26,15 +26,15 @@
     "tenant_id": "tenant_abc123",
     "lifecycle_state": "EXECUTING",
     "timestamp": "2026-10-15T15:30:00Z",
-    "previous_ledger_hash": "sha256:e28421d282666a1e8795797cf393fac2bc7ba2527f9a7c5522308df8be3967f8",
+    "previous_ledger_hash": "sha256:ca65feabda07a361e9def32fc7f107b7b690bb29de3c08de32cca27a6f1ce39a",
     "payload": {
       "action": "export_start",
       "job_id": "export_job_9912",
       "requested_by": "agent_x"
     },
     "payload_hash": "sha256:312e7a30006c73b10895c84699def26e9008f65a6cdab0606d556d6969379642",
-    "current_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
-    "signature": "ed25519:5tEZMS2I3EDJwGa9CE_3JjdIDwQ0SVgC0TEen-c0UfebhpRB0Gl4mAXJBUQaelSDbnZpLXsiLkAJcVHbsuWwCQ=="
+    "current_hash": "sha256:b4f6016646fc3f61fb5f011eaec10a0a7db8a695baaddabf31964aeed282120e",
+    "signature": "ed25519:jlJkoGSK4XxQfpRqxcrUk31IjnnH1qEVJOJV9KpKQlF6L6b1hfoNo9rWuMuhT5_FwAestWKIJdK1weduvOAKAw=="
   },
   {
     "ledger_id": "log_export_7732",
@@ -42,7 +42,7 @@
     "tenant_id": "tenant_abc123",
     "lifecycle_state": "RESOLVED",
     "timestamp": "2026-10-15T15:45:00Z",
-    "previous_ledger_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
+    "previous_ledger_hash": "sha256:b4f6016646fc3f61fb5f011eaec10a0a7db8a695baaddabf31964aeed282120e",
     "payload": {
       "action": "export_compressed",
       "requested_by": "agent_x",
@@ -60,7 +60,7 @@
       }
     },
     "payload_hash": "sha256:c7f2d9500dc1940560d71a4ec31f061fcb8770f2ed7f8cd84d15ae006657d629",
-    "current_hash": "sha256:22615fb0da972129ca7839a886748f1e3e2738dde294fdd4525c1db24240a331",
-    "signature": "ed25519:obwTdb6SkoTxLA_TuCkMOYHhaT3u7DJiLJo1o1Uf1ST5VDWZBYxZctoj4SX_x4ze4Sq19GZKZqHfz1UJd-h6Bg=="
+    "current_hash": "sha256:7ed1491114e6f51e44ecb3322fe6170bc876b69b38279cce1118d00d35cc4d9d",
+    "signature": "ed25519:HL1Y5QYi4WXI8SN8DI1kV2gW-DXQDVF-ML_oTZrGnR7ARffwODMxpOLM85W39FhAhHVCvRXUkMRdTfXp3O7hDg=="
   }
 ]

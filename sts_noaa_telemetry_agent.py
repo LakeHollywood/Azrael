@@ -23,7 +23,13 @@ import requests
 # task bodies and are unchanged — only the loop structure moved from "one
 # monolithic daemon function" to "agent running registered tasks".
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from task_runner import Agent, Task, TaskPolicy, TaskStatus  # noqa: E402
+from task_runner import (  # noqa: E402
+    Agent,
+    Task,
+    TaskCapability,
+    TaskPolicy,
+    TaskStatus,
+)
 
 NOAA_ENDPOINTS = {
     "GOES_MAG": "https://services.swpc.noaa.gov/json/goes/primary/magnetometers-7-day.json",
@@ -188,12 +194,20 @@ def make_ingest_task(name: str, url: str) -> Task:
         _ingest,
         policy=TaskPolicy(timeout_seconds=FETCH_TIMEOUT_SECONDS + 1.0, max_attempts=1),
         description=f"Poll and buffer one sample from the {name} feed",
+        # Capability declaration: network fetch + local telemetry bind only.
+        requires=(TaskCapability.NETWORK_READ, TaskCapability.TELEMETRY_INGEST),
     )
 
 
 def build_agent(agent_id: str = AGENT_ID) -> Agent:
     """Construct the STS telemetry AGENT with its feed tasks registered."""
-    agent = Agent(agent_id, name="STS NOAA Telemetry Agent", roles=("telemetry", "ingestion"))
+    agent = Agent(
+        agent_id,
+        name="STS NOAA Telemetry Agent",
+        roles=("telemetry", "ingestion"),
+        capabilities=(TaskCapability.READ, TaskCapability.NETWORK_READ,
+                      TaskCapability.TELEMETRY_INGEST, TaskCapability.AUDIT_WRITE),
+    )
     agent.register(*(make_ingest_task(n, u) for n, u in NOAA_ENDPOINTS.items()))
     return agent
 

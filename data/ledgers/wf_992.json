@@ -4,7 +4,6 @@
     "workflow_id": "wf_992",
     "lifecycle_state": "PROPOSED",
     "timestamp": "2026-10-15T14:35:00Z",
-    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "execution_context": {
       "tenantId": "acme",
       "accounts": [
@@ -18,7 +17,45 @@
         }
       ]
     },
+    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "payload_hash": "sha256:fe41579c9933cf21bf374485da901f7b3a0c42526e55e81500e2054192564d59",
+    "current_hash": "sha256:7829180dc157603e0094583da56a91fbca168c572ea0881123c68d1dca6c6972",
+    "signature": "ed25519:_6798lqS_HCLWtolNr8RckHwmEr8yWkwXPJXJHCt8aHO31pE_esKwgJDAlDeqqBsC3SSeA-zmaYdBoBSHDYwBg=="
+  },
+  {
+    "ledger_id": "log_4493",
+    "workflow_id": "wf_992",
+    "lifecycle_state": "APPROVED",
+    "timestamp": "2026-10-15T14:40:00Z",
+    "execution_context": {
+      "approver": "alice_admin",
+      "second_approver": "bob_security"
+    },
+    "approval_context": {
+      "authorized_targets": [
+        "cash"
+      ],
+      "rationale": "planned disbursement tx-1 remediation"
+    },
+    "previous_ledger_hash": "sha256:7829180dc157603e0094583da56a91fbca168c572ea0881123c68d1dca6c6972",
+    "payload_hash": "sha256:6789854d8927c3a83f5a5bc645d26ffafa6bf3655437490b6f778bd0889b1aaf",
+    "current_hash": "sha256:572a8e727d62eeb78b0ce06e9e5bd14345e3e7c15d2702128881e2870102360e",
+    "signature": "ed25519:Qv65jW7XMItSO6mKHwMmFEIW3Sg67QXWUz_6ErniaBN5mZdvcYRfWczBiJj5nc8diX5JCxwe-GrJPSipJ96yDQ=="
+  },
+  {
+    "ledger_id": "log_4494",
+    "workflow_id": "wf_992",
+    "lifecycle_state": "EXECUTING",
+    "timestamp": "2026-10-15T14:45:00Z",
+    "execution_context": {
+      "action": "debit",
+      "target_account": "cash",
+      "amount_cents": -40000
+    },
+    "previous_ledger_hash": "sha256:572a8e727d62eeb78b0ce06e9e5bd14345e3e7c15d2702128881e2870102360e",
+    "payload_hash": "sha256:9527159b93cc029f1866a6ac2d9b66aca719498cdbfc4de4a73d15e52f238744",
+    "current_hash": "sha256:c50670058f9fe93752fd051ace41df9f5c3aa4148a0983c666f1756472a0c2ba",
+    "signature": "ed25519:NurAwRKYP3ez0q5wVyGyJbjTxO9N3PCLLazcsTb8-lXR56U9wJ3eRwUXAJvGNk5SGByIdbnZMrbktt2D-Z8WBg=="
     "current_hash": "sha256:0e51bb7f50745cc7c28e3ec58f240ed0ed0ad62e7a8e07fa6fe1ff2a5b2b1afa",
     "signature": "ed25519:BYG8zAfqKOnDiBOyVB0eWUzmLTDe9vXcj2iGTW9auBOmqwak7smpy7hQicXtNhw-IriKCa85ivzJHmz-NC6aBg=="
   }

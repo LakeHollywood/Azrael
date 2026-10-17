@@ -213,7 +213,7 @@ class LedgerAPI:
 
     Agent/task separation (see task_runner.py): this class owns identity,
     lifecycle, shared state (Redis backend, velocity monitor, idempotency
-    cache) and supervision/audit — i.e. *who* runs and *whether* it may run.
+      # cache) and supervision/audit — i.e. *who* runs and *whether* it may run.
     The actual request-time work lives in discrete TASKS:
 
       ``admit-transaction``  one transaction admission (balance/risk/velocity)

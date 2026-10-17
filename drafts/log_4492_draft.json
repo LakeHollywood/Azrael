@@ -1,9 +1,9 @@
 {
-  "ledger_id": "log_4492",
+  "ledger_id": "log_4492_reissued",
   "workflow_id": "wf_992",
-  "lifecycle_state": "PROPOSED",
-  "timestamp": "2026-10-15T14:35:00Z",
-  "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "lifecycle_state": "APPROVED",
+  "timestamp": "2026-10-16T12:00:00Z",
+  "previous_ledger_hash": "sha256:7829180dc157603e0094583da56a91fbca168c572ea0881123c68d1dca6c6972",
   "execution_context": {
     "tenantId": "acme",
     "accounts": [
@@ -16,5 +16,14 @@
         }
       }
     ]
+  },
+  "payload_hash": "sha256:fe41579c9933cf21bf374485da901f7b3a0c42526e55e81500e2054192564d59",
+  "current_hash": "sha256:12443da4065ff60becabc5b539a0d6cf4d1dbc66ccce1d52d3920a930e98b44a",
+  "signature": "ed25519:dlo77thgAmnJX1zsVN3_Or9X2_XieppeTl07uNtmkog6g-jCDF_ShT9YOfwNsMZyQhdweuEOel-5gb5tFUu1Dg==",
+  "approval_context": {
+    "authorized_targets": [
+      "cash"
+    ],
+    "rationale": "re-issue of anchor snapshot under wf_992 scope"
   }
 }

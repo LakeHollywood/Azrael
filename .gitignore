@@ -1,6 +1,10 @@
+engine/tla/states/
 __pycache__/
 *.pyc
 .ledgerdev/
-__pycache__/
 server.log
 node_modules/
+dist/
+.hypothesis/
+.pytest_cache/
+mutants/

@@ -165,6 +165,29 @@ def _find_approved_ancestor(entries: list[dict], entry: dict) -> dict | None:
     return None
 
 
+def _authorized_targets(approved: dict):
+    """Return an APPROVED entry's authorized_targets list, or None.
+
+    Fail closed: anything other than a non-empty list (missing/malformed
+    approval_context) yields None so callers can emit the refusal error.
+    """
+    approval_ctx = approved.get("approval_context")
+    authorized = (approval_ctx.get("authorized_targets")
+                  if isinstance(approval_ctx, dict) else None)
+    if not isinstance(authorized, list) or not authorized:
+        return None
+    return authorized
+
+
+def _scope_errors(payload, authorized, subject: str) -> list[str]:
+    """Targets of ``payload`` outside ``authorized`` -> error message(s)."""
+    unauthorized = [t for t in extract_targets(payload) if t not in authorized]
+    if unauthorized:
+        return [f"{subject} target(s) outside approved scope: "
+                f"{unauthorized}; authorized={sorted(authorized)}"]
+    return []
+
+
 def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
                  expected_previous_state_entry: dict | None = None,
                  entries: list[dict] | None = None) -> list[str]:
@@ -254,21 +277,15 @@ def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
         # APPROVED predecessor. Fail closed: an APPROVED entry without an
         # explicit authorized_targets list authorizes NOTHING.
         if prev_state == "APPROVED":
-            approval_ctx = expected_previous_state_entry.get("approval_context")
-            authorized = (approval_ctx.get("authorized_targets")
-                          if isinstance(approval_ctx, dict) else None)
-            if not isinstance(authorized, list) or not authorized:
+            authorized = _authorized_targets(expected_previous_state_entry)
+            if authorized is None:
                 errors.append(
                     "APPROVED predecessor lacks a non-empty "
                     "approval_context.authorized_targets list; execution scope "
                     "cannot be verified (fail closed)")
             else:
-                unauthorized = [t for t in extract_targets(
-                    entry.get("execution_context")) if t not in authorized]
-                if unauthorized:
-                    errors.append(
-                        "target(s) outside approved scope: "
-                        f"{unauthorized}; authorized={sorted(authorized)}")
+                errors.extend(_scope_errors(
+                    entry.get("execution_context"), authorized, ""))
 
     # --- closure-state scope check ------------------------------------------
     # RESOLVED/COMPLETED entries carry the *result* of execution (e.g. an
@@ -283,21 +300,15 @@ def verify_entry(entry: dict, hmac_secret: bytes, ed25519_pubkey_b64: str,
     if state in ("RESOLVED", "COMPLETED") and entries is not None:
         approved_ancestor = _find_approved_ancestor(entries, entry)
         if approved_ancestor is not None:
-            approval_ctx = approved_ancestor.get("approval_context")
-            authorized = (approval_ctx.get("authorized_targets")
-                          if isinstance(approval_ctx, dict) else None)
-            if not isinstance(authorized, list) or not authorized:
+            authorized = _authorized_targets(approved_ancestor)
+            if authorized is None:
                 errors.append(
                     f"{state} entry's APPROVED ancestor lacks a non-empty "
                     "approval_context.authorized_targets list; result scope "
                     "cannot be verified (fail closed)")
             else:
-                unauthorized = [t for t in extract_targets(payload_of(entry))
-                                if t not in authorized]
-                if unauthorized:
-                    errors.append(
-                        f"{state} result target(s) outside approved scope: "
-                        f"{unauthorized}; authorized={sorted(authorized)}")
+                errors.extend(_scope_errors(
+                    payload_of(entry), authorized, f"{state} result"))
         elif expected_previous_state_entry is not None \
                 and expected_previous_state_entry.get(
                     "lifecycle_state") != "APPROVED":

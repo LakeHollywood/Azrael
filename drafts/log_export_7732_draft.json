@@ -4,7 +4,7 @@
   "tenant_id": "tenant_abc123",
   "lifecycle_state": "RESOLVED",
   "timestamp": "2026-10-15T15:45:00Z",
-  "previous_ledger_hash": "sha256:1e2d9fbb3c3c2430310acf2387aa8442fe50142e32a74c16d5a8ba980dcba108",
+  "previous_ledger_hash": "sha256:e947d11639cf72e8302dfed8d289c4200c9b774c7dc8748b8b41ab0d7d8b4a99",
   "payload": {
     "action": "export_compressed",
     "requested_by": "agent_x",
@@ -20,5 +20,8 @@
       "object_key": "exports/tenant_abc123/export_9912.tar.gz.enc",
       "encryption_algorithm": "AES-256-GCM"
     }
-  }
+  },
+  "payload_hash": "sha256:c7f2d9500dc1940560d71a4ec31f061fcb8770f2ed7f8cd84d15ae006657d629",
+  "current_hash": "sha256:4746017da23890b3ec1f3f16b0fc9fbe288d5f72997c35533423ce65906b6d4a",
+  "signature": "ed25519:uvtA191ay3JCwqw02q1HkzTg7zYL4F9KR8WdPzAolGCalrMznCZ7TCGZH4FnvlB7FH0RWaEuUja0I-gXg9LBCA=="
 }

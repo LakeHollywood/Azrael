@@ -4,7 +4,6 @@
     "workflow_id": "wf_992",
     "lifecycle_state": "PROPOSED",
     "timestamp": "2026-10-15T14:35:00Z",
-    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "execution_context": {
       "tenantId": "acme",
       "accounts": [
@@ -18,8 +17,46 @@
         }
       ]
     },
+    "previous_ledger_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "payload_hash": "sha256:fe41579c9933cf21bf374485da901f7b3a0c42526e55e81500e2054192564d59",
-    "current_hash": "sha256:0e51bb7f50745cc7c28e3ec58f240ed0ed0ad62e7a8e07fa6fe1ff2a5b2b1afa",
-    "signature": "ed25519:BYG8zAfqKOnDiBOyVB0eWUzmLTDe9vXcj2iGTW9auBOmqwak7smpy7hQicXtNhw-IriKCa85ivzJHmz-NC6aBg=="
+    "current_hash": "sha256:d95b793c82ea75af4f8bc3c40a9bf98e02d63d4fa60dd2067e7f646470c09b16",
+    "signature": "ed25519:kJbnwuV8C8WfhSbLsho86yijn2SYK3yC9SwyOVZdgFQuHUzNd2NZoYcewZOnQFDOrlizTWFu8mTp7GshYJsACQ=="
+  },
+  {
+    "ledger_id": "log_4493",
+    "workflow_id": "wf_992",
+    "lifecycle_state": "APPROVED",
+    "timestamp": "2026-10-15T14:40:00Z",
+    "execution_context": {
+      "approver": "alice_admin",
+      "second_approver": "bob_security"
+    },
+    "approval_context": {
+      "authorized_targets": [
+        "cash"
+      ],
+      "rationale": "planned disbursement tx-1 remediation"
+    },
+    "previous_ledger_hash": "sha256:d95b793c82ea75af4f8bc3c40a9bf98e02d63d4fa60dd2067e7f646470c09b16",
+    "payload_hash": "sha256:6789854d8927c3a83f5a5bc645d26ffafa6bf3655437490b6f778bd0889b1aaf",
+    "current_hash": "sha256:1ab1bec5e56b98af38efc52f7745dc63180cb323408dd5967dc5f10792835112",
+    "signature": "ed25519:QhAdLGBLk7uUs6Xu1s-oKwEehsGm96JN2BQsu_eBCAUo1ZYn38fJNEa81bgPPETCwFaclmWJFOGJCxw8HcduCw=="
+  },
+  {
+    "ledger_id": "log_4494",
+    "workflow_id": "wf_992",
+    "lifecycle_state": "EXECUTING",
+    "timestamp": "2026-10-15T14:45:00Z",
+    "execution_context": {
+      "action": "debit",
+      "target_account": "cash",
+      "amount_cents": -40000
+    },
+    "previous_ledger_hash": "sha256:1ab1bec5e56b98af38efc52f7745dc63180cb323408dd5967dc5f10792835112",
+    "payload_hash": "sha256:9527159b93cc029f1866a6ac2d9b66aca719498cdbfc4de4a73d15e52f238744",
+    "current_hash": "sha256:c50670058f9fe93752fd051ace41df9f5c3aa4148a0983c666f1756472a0c2ba",
+    "signature": "ed25519:NurAwRKYP3ez0q5wVyGyJbjTxO9N3PCLLazcsTb8-lXR56U9wJ3eRwUXAJvGNk5SGByIdbnZMrbktt2D-Z8WBg=="
+    "current_hash": "sha256:4c42facbd7079fe55edc3a33e8c6797c851e206bf11ade638540987eb323fea5",
+    "signature": "ed25519:vEkau2EBVJq9HtuuBAWnCfvNk13A6hnIBXfmu_oK5Zvqs5V8hu0iovgFD9pNjxJEtk5ECUl8YuUke9RN_YQnCg=="
   }
 ]

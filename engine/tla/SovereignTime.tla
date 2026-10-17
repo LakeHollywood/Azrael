@@ -18,6 +18,21 @@ WatchdogSec -- given the operator precondition recorded in the unit file
 ("Expects watchdog ping every < 30 seconds"), formalized as
 PollInterval + MaxJitter <= WatchdogSec.
 
+Ping-cadence accounting (per systemd.service(7) / sd_notify(3)): `sincePing`
+measures elapsed time since the last WATCHDOG=1 ping; a ping restarts the
+deadline.  The fetch+ping transition models one whole daemon iteration
+atomically and its first action is the blocking fetch loop, so after it the
+counter is RE-BASED to MaxJitter*StepUnit (the pre-ping fetch time of the new
+cycle already counts against the new deadline), not 0.  Sleep transitions then
+ACCUMULATE onto that base; consecutive sleeps without an intervening ping keep
+growing the counter until the expiry transition can fire (alive' = FALSE).
+Worst-case time between two pings along each path:
+    success cycle : PollInterval + MaxJitter*StepUnit   (22 <= 30 by ASSUME)
+    fixed nap     : WatchdogSec div 2 + MaxJitter*StepUnit   (15 + 12 = 27 < 30)
+    v1 bug nap    : backoff (grows to MaxBackoff = 300)      (uncapped -> kill)
+With the shipped constants both safe branches stay strictly below WatchdogSec
+and only the buggy branch can reach the expiry transition.
+
 The v1 BUG (sleep the UNCAPPED backoff, compute the dynamic cap only
 afterwards) is encoded as a distinct transition, disabled by default via the
 constant `buggy`.  Flip it to TRUE in the .cfg and TLC produces a concrete
@@ -46,10 +61,16 @@ CONSTANTS
 ASSUME WatchdogSec > 0
 ASSUME PollInterval >= 0
 ASSUME MaxJitter >= 1
+ASSUME StepUnit >= 1
 ASSUME MaxBackoff >= 1
 
-\* Operator precondition: worst-case ping cadence must fit inside the budget.
-ASSUME PollInterval + MaxJitter <= WatchdogSec
+\* Operator preconditions: the worst-case ping cadence must fit inside the
+\* watchdog budget on BOTH healthy and degraded paths (strict <, because
+\* DriftBounded requires sincePing < WatchdogSec at all times):
+\*   healthy cycle : fetch jitter + poll sleep          <= WatchdogSec - 1
+\*   fixed nap     : fetch jitter + capped nap (half)   <= WatchdogSec - 1
+ASSUME PollInterval + MaxJitter * StepUnit <= WatchdogSec
+ASSUME (WatchdogSec \div 2) + MaxJitter * StepUnit < WatchdogSec
 
 (* ------------------------------------------------------------------- types *)
 LaneSet ==
@@ -102,20 +123,34 @@ Next ==
           last HTTP response and the ping there is no blocking call, so systemd
           can never expire the watchdog inside that window.  Hence the
           countdown is always reset at the end of every iteration and the ONLY
-          hazard is the duration of the sleep statement that follows. *)
+          hazard is the duration of the sleep statement that follows.
+
+          sincePing' = 0: WATCHDOG=1 restarts systemd's deadline at the INSTANT
+          of the ping, so elapsed-since-last-ping is exactly 0 here.  The fetch
+          jitter consumed BEFORE this ping counted against the PREVIOUS
+          deadline and was already charged to it by the previous iteration's
+          sleep transition (see SLEEP branches below: they add PollInterval or
+          nap PLUS MaxJitter*StepUnit, i.e. sleep + the next cycle's pre-ping
+          fetch, keeping the whole inter-ping gap accounted on one step). *)
         /\ alive
         /\ \E f \in SUBSET LaneSet :
               /\ mono'      = mono + MaxJitter * StepUnit
               /\ drift'     = drift + MaxJitter * StepUnit
               /\ laneOk'    = f                  \* f = subset that stayed up
-              /\ sincePing' = 0                  \* WATCHDOG=1 pinged inside cycle
+              /\ sincePing' = 0                  \* WATCHDOG=1 restarts the deadline
               /\ UNCHANGED <<backoff, alive>>
 
-    \/ (* Sleep phase, success branch: sleep(PollInterval), reset backoff. *)
+    \/ (* Sleep phase, success branch: sleep(PollInterval), reset backoff.
+          Charges the FULL inter-ping gap for one healthy iteration onto this
+          step: PollInterval (the sleep) + MaxJitter*StepUnit (the pre-ping
+          fetch of the NEXT iteration, whose ping will zero the counter).
+          Accumulating across back-to-back sleeps without an intervening ping
+          is impossible in the real loop -- every sleep is immediately followed
+          by fetch+ping -- so modelling the pair atomically here is exact. *)
         /\ alive
         /\ laneOk /= {}                          \* cycle_success == TRUE
         /\ backoff'   = 1
-        /\ sincePing' = sincePing + PollInterval
+        /\ sincePing' = sincePing + PollInterval + MaxJitter * StepUnit
         /\ UNCHANGED <<mono, drift, laneOk, alive>>
 
     \/ (* FIXED failure branch: cap computed and applied BEFORE sleeping:

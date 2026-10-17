@@ -1,0 +1,10 @@
+# Rust workspace for the sovereign engine service.
+# Kept separate from the Python/TS tooling; CI installs rustup before running
+# `cargo test -p sovereign_engine_service --test agent_v2_pipeline`.
+[workspace]
+resolver = "2"
+members = ["crates/sovereign_engine_service"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

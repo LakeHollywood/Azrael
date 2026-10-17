@@ -1,0 +1,15 @@
+[package]
+name = "sovereign_engine_service"
+version.workspace = true
+edition.workspace = true
+description = "Agent v2 pipeline: parse -> validate -> risk-score -> approval-gate -> execute, with tamper-evident audit logging."
+license = "MIT"
+
+[dependencies]
+# Intentionally empty: std-only so the mutation gate / CI stay dependency-free.
+
+[dev-dependencies]
+
+[[test]]
+name = "agent_v2_pipeline"
+path = "tests/agent_v2_pipeline.rs"

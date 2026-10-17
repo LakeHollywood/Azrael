@@ -47,6 +47,9 @@ from task_runner import (  # noqa: E402
     AgentState,
     ApprovalRequired,
     Task,
+    TaskCapability,
+    TaskContext,
+    TaskMode,
     TaskPolicy,
     TaskStatus,
 )
@@ -235,22 +238,43 @@ class LedgerAPI:
         self.redis, self.redis_backend = _get_redis()
         self.monitor = VelocityMonitor(self.redis)
         self.tx_cache = {}          # tx-id -> cached verdict (idempotency)
+        self._read_only_dispatch = False  # strict-isolation kill switch
         self.audited_tenants = {"acme"}
         self.agent = Agent(
             "ledger-api",
             name="Ledger Control-Plane Agent",
             roles=("ledger", "hitl-gate"),
             metadata={"redis_backend": self.redis_backend},
+            # PRIVILEGED execution context: this agent's default grant is the
+            # ceiling for everything it dispatches. Read-only callers get a
+            # narrowed TaskContext (see post_transaction/verify).
+            context=TaskContext.privileged(
+                gated=(TaskCapability.FINANCIAL_MUTATION,),
+                extra=(TaskCapability.READ, TaskCapability.AUDIT_WRITE,
+                       TaskCapability.LEDGER_VERIFY),
+            ),
         )
         self.agent.register(
             Task("admit-transaction", self._task_admit_transaction,
                  gate=self._gate_known_tenant,
                  policy=TaskPolicy(timeout_seconds=self.TX_TIMEOUT_SECONDS),
-                 description="Admit/reject one transaction at request time"),
+                 description="Admit/reject one transaction at request time",
+                 # GATED financial action: only contexts holding
+                 # FINANCIAL_MUTATION can execute it (enforced fail-closed
+                 # by the agent before the gate/body ever run).
+                 # Read-only observation of balances/risk (no side effects)
+                 # plus the gated mutation itself; enforced fail-closed by
+                 # the agent before gate/body run.
+                 requires=(TaskCapability.READ,
+                           TaskCapability.FINANCIAL_MUTATION)),
             Task("verify-chain", self._task_verify_chain,
                  gate=self._gate_verifiable_tenant,
                  policy=TaskPolicy(timeout_seconds=self.VERIFY_TIMEOUT_SECONDS),
-                 description="Recompute payload hashes and walk one ledger chain"),
+                 description="Recompute payload hashes and walk one ledger chain",
+                 # Read-only observation of the chain: safe for READ_ONLY
+                 # agents/contexts.
+                 # Pure chain recomputation: readable by READ_ONLY contexts.
+                 requires=(TaskCapability.READ,)),
         )
         self.agent.start()
 
@@ -271,17 +295,62 @@ class LedgerAPI:
 
     # -- task bodies ----------------------------------------------------------
 
-    def _task_admit_transaction(self, *, api: "LedgerAPI", tenant: str,
-                                body: dict) -> tuple:
+    def _task_admit_transaction(self, ctx: TaskContext, *, api: "LedgerAPI",
+                                tenant: str, body: dict) -> tuple:
+        # Defense in depth: the structural check lives in the agent
+        # (context.requires FINANCIAL_MUTATION was enforced before this line
+        # ran); re-check here so even a direct call cannot bypass isolation.
+        if not ctx.can(TaskCapability.FINANCIAL_MUTATION):
+            raise ApprovalRequired(
+                f"context_mode:{ctx.mode.value} cannot invoke gated "
+                "financial action")
         return api._admit_transaction(tenant, body)
 
-    def _task_verify_chain(self, *, api: "LedgerAPI", tenant: str,
-                           body: dict) -> tuple:
+    def _task_verify_chain(self, ctx: TaskContext, *, api: "LedgerAPI",
+                           tenant: str, body: dict) -> tuple:
         return api._verify_impl(tenant, body)
+
+    def _dispatch_context(self, tenant: str, gated: bool) -> TaskContext:
+        """Build the per-request execution context (strict boundary).
+
+        * tenant scoping: the context carries exactly one tenant; a task may
+          never act across tenants (checked against the agent's grant).
+        * non-financial endpoints (verify) are dispatched through a
+          READ_ONLY view — structurally incapable of money movement even if
+          a bug routed them at admit-transaction.
+        * financial endpoints require an explicit caller grant
+          (``self.financial_grant``, set by the operator/HITL layer); with
+          no grant the request runs under a read-only context and the agent
+          refuses it BEFORE any gated code executes.
+        """
+        base = self.agent.default_context
+        scoped = base.narrowed(tenant=tenant)
+        if not gated:
+            # Read-only view of the PRIVILEGED grant: keeps READ (so verify-
+            # chain executes) but strips every gated capability, so this
+            # context is structurally incapable of money movement.
+            return TaskContext.derive((TaskCapability.READ,), tenant=tenant)
+        ro_view = TaskContext.derive((TaskCapability.READ,), tenant=tenant)
+        if getattr(self, "_read_only_dispatch", False):
+            return ro_view
+        env_default = os.environ.get("LEDGER_FINANCIAL_MODE", "granted")
+        if env_default == "read_only":
+            return ro_view
+        grant = getattr(self, "financial_grant", None)
+        if grant is None:
+            # Default posture: PRIVILEGED (the admission pipeline runs; the
+            # approval gate still holds every admitted transaction as
+            # PROPOSED_AWAITING_APPROVAL — nothing executes without HITL).
+            # Fail-closed read-only dispatch is available per-process via
+            # LEDGER_FINANCIAL_MODE=read_only or per-instance via
+            # api.agent.dispatch_context = TaskContext.read_only(...).
+            return scoped
+        return scoped.narrowed(actor=grant.get("actor"),
+                               metadata=dict(grant))
 
     # -- task execution helper --------------------------------------------------
 
-    def _execute(self, task_name: str, **kwargs) -> tuple:
+    def _execute(self, task_name: str, context=None, **kwargs) -> tuple:
         """Run a registered task via the agent; map TaskResult to HTTP pair.
 
         Returns (status, payload). Policy/crash outcomes that would escape
@@ -289,7 +358,7 @@ class LedgerAPI:
         API has always returned, so client behaviour is unchanged while the
         execution now flows through the audited task boundary.
         """
-        res = self.agent.run_task(task_name, api=self, **kwargs)
+        res = self.agent.run_task(task_name, context=context, api=self, **kwargs)
         if res.ok:
             status, payload = res.output
             return status, payload
@@ -306,6 +375,22 @@ class LedgerAPI:
                        else "unknown_tenant")
                 payload = {"error": key, "tenant": kwargs.get("tenant")}
                 return (404, payload)
+            if res.error_type == "InsufficientCapabilities":
+                # Execution-context isolation refused the action BEFORE any
+                # gated code ran (e.g. a read-only context invoking the
+                # gated financial task). Distinct, machine-readable error.
+                _audit("tx.rejected" if task_name == "admit-transaction"
+                       else "verify.rejected",
+                       tenant=kwargs.get("tenant"), outcome="rejected",
+                       resource=task_name.split("-")[0],
+                       details={"error": "insufficient_capabilities",
+                                "context_mode": res.context_mode,
+                                "required_capabilities":
+                                    res.as_dict()["required_capabilities"]})
+                return 403, {"error": "insufficient_capabilities",
+                             "detail": res.error,
+                             "context_mode": res.context_mode,
+                             "task": res.as_dict()}
             return 403, {"error": "task_rejected",
                          "detail": res.error, "task": res.as_dict()}
         if res.status is TaskStatus.TIMED_OUT:
@@ -318,6 +403,20 @@ class LedgerAPI:
         return 500, {"error": "internal", "detail": res.error,
                      "task": res.as_dict()}
 
+    def set_financial_grant_actor(self, actor: str) -> None:
+        """Tag financial dispatches with the approving actor (audit detail)."""
+        self.financial_grant = {"actor": actor}
+
+    def dispatch_as_read_only(self) -> None:
+        """Flip this instance to strict isolation: every transaction request
+        is dispatched under a READ_ONLY context and structurally refused by
+        the agent (403 insufficient_capabilities) BEFORE any gated code
+        runs. Verification keeps working (it requires no capabilities)."""
+        self._read_only_dispatch = True
+
+    def restore_privileged_dispatch(self) -> None:
+        self._read_only_dispatch = False
+
     def health(self) -> dict:
         """Agent health surfaced on /healthz (separate from task results)."""
         h = self.agent.health()
@@ -327,10 +426,16 @@ class LedgerAPI:
     # -- endpoints (thin adapters over tasks) ------------------------------------
 
     def post_transaction(self, tenant: str, body: dict):
-        return self._execute("admit-transaction", tenant=tenant, body=body)
+        return self._execute("admit-transaction",
+                             context=self._dispatch_context(tenant, gated=True),
+                             tenant=tenant, body=body)
 
     def verify(self, tenant: str, body: dict):
-        return self._execute("verify-chain", tenant=tenant, body=body)
+        # Read-only action: dispatched through a READ_ONLY context, which by
+        # construction can never reach a gated financial task.
+        return self._execute("verify-chain",
+                             context=self._dispatch_context(tenant, gated=False),
+                             tenant=tenant, body=body)
 
     # -- original implementations, now task bodies -------------------------------
 

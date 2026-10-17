@@ -18,7 +18,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest hypothesis mutmut
+          pip install pytest hypothesis mutmut fakeredis cryptography
+      - name: Bootstrap dev ledger keys (re-sign sample chains in data/ledgers/)
+        # test_ledger_api_server.py's verify-chain tests read key material from
+        # the gitignored .ledgerdev/ dir and validate the committed sample
+        # ledgers against it; generate_dev_ledger_keys.py creates the keys and
+        # re-issues those chains so CI matches the local green state.
+        run: python scripts/generate_dev_ledger_keys.py
       - name: Run test suite
         env:
           # broken libtmux pytest plugin workaround (also set inside the gate script)
@@ -44,7 +50,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest hypothesis mutmut
+          pip install pytest hypothesis mutmut fakeredis cryptography
+      - name: Bootstrap dev ledger keys (re-sign sample chains in data/ledgers/)
+        # Same bootstrap as python-tests: check_mutants.sh runs the full suite,
+        # whose verify-chain tests require .ledgerdev/ key material.
+        run: python scripts/generate_dev_ledger_keys.py
       - name: Mutation testing gate (scripts/check_mutants.sh)
         run: bash scripts/check_mutants.sh
 

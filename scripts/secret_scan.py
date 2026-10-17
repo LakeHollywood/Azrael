@@ -33,6 +33,12 @@ DENY_PATTERNS = [
     r"(^|/)server\.log$",
 ]
 
+# Vendored build artifacts: minified JS/CSS bundles and their source maps are
+# generated, credential-free by construction (React internals etc. trip the
+# base64 entropy heuristic). The repo ships them tracked under dist/, so scan
+# only the entry HTML there, not the bundled assets.
+GENERATED_ASSET_PATH = re.compile(r"^dist/(assets/|.*\.map$)")
+
 # High-signal literal patterns (GitHub-style secret scanning rules).
 LITERAL_PATTERNS = [
     (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "private key material"),
@@ -195,6 +201,8 @@ def main() -> int:
     findings = []
     for path, data in items:
         if path in SELF_TEST_PATHS:
+            continue
+        if GENERATED_ASSET_PATH.match(path):
             continue
         if denylisted(path):
             findings.append(f"{path}:<whole file>: deny-listed path (must not be committed)")

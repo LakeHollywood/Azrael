@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 // ── Incident Data ───────────────────────────────────────────────────
 const incident = {
@@ -16,111 +16,510 @@ const incident = {
   ledger_record_state: 'PASS_PUBLISHED_V1_1',
 };
 
-// ── Digest Diff Analyzer ────────────────────────────────────────────
-function analyzeDigestDiff(bound: string, target: string) {
-  const maxLen = Math.max(bound.length, target.length);
-  const diffs: { index: number; boundChar: string; targetChar: string; match: boolean }[] = [];
-
-  for (let i = 0; i < maxLen; i++) {
-    const bc = bound[i] || '·';
-    const tc = target[i] || '·';
-    diffs.push({ index: i, boundChar: bc, targetChar: tc, match: bc === tc });
+// ── Hex Dump Formatter ──────────────────────────────────────────────
+function toHexDump(hex: string, bytesPerRow = 8) {
+  const rows: { offset: string; bytes: string[]; ascii: string }[] = [];
+  for (let i = 0; i < hex.length; i += bytesPerRow * 2) {
+    const chunk = hex.slice(i, i + bytesPerRow * 2);
+    const bytes: string[] = [];
+    let ascii = '';
+    for (let j = 0; j < chunk.length; j += 2) {
+      const byte = chunk.slice(j, j + 2);
+      bytes.push(byte);
+      const code = parseInt(byte, 16);
+      ascii += code >= 32 && code <= 126 ? String.fromCharCode(code) : '.';
+    }
+    rows.push({
+      offset: (i / 2).toString(16).toUpperCase().padStart(8, '0'),
+      bytes,
+      ascii,
+    });
   }
-
-  const mismatchCount = diffs.filter((d) => !d.match).length;
-  const firstMismatch = diffs.findIndex((d) => !d.match);
-  const lastMismatch = diffs.length - 1 - [...diffs].reverse().findIndex((d) => !d.match);
-
-  return { diffs, mismatchCount, firstMismatch, lastMismatch, totalLength: maxLen };
+  return rows;
 }
 
-// ── Timeline Event ──────────────────────────────────────────────────
-interface TimelineStep {
+// ── Byte-level Diff ─────────────────────────────────────────────────
+interface ByteDiff {
+  offset: number;
+  boundByte: string;
+  targetByte: string;
+  match: boolean;
+}
+
+function computeByteDiff(bound: string, target: string): ByteDiff[] {
+  const maxLen = Math.max(bound.length, target.length);
+  const diffs: ByteDiff[] = [];
+  for (let i = 0; i < maxLen; i += 2) {
+    const bb = bound.slice(i, i + 2) || '??';
+    const tb = target.slice(i, i + 2) || '??';
+    diffs.push({ offset: i / 2, boundByte: bb, targetByte: tb, match: bb === tb });
+  }
+  return diffs;
+}
+
+// ── Containment Replay ──────────────────────────────────────────────
+interface ReplayFrame {
   time: string;
+  elapsed: string;
   label: string;
   detail: string;
-  status: 'ok' | 'warn' | 'fail';
+  status: 'ok' | 'warn' | 'fail' | 'critical';
   icon: string;
+  sourceRef?: string;
 }
 
-const timelineSteps: TimelineStep[] = [
+const replayFrames: ReplayFrame[] = [
   {
     time: 'T+0.000ms',
-    label: 'Predicate invocation received',
-    detail: 'azrael_eval_predicate() called with sequence_id=10492834',
+    elapsed: '0%',
+    label: 'azrael_eval_predicate() invoked',
+    detail: 'ctx=0x7f3a..., payload_ptr=0x7f3a..., payload_len=29',
     status: 'ok',
     icon: 'fa-arrow-right-to-bracket',
+    sourceRef: 'azrael_engine.rs:38',
   },
   {
-    time: 'T+0.003ms',
+    time: 'T+0.002ms',
+    elapsed: '14%',
+    label: 'catch_unwind scope entered',
+    detail: 'Panic containment active — all unwinds caught',
+    status: 'ok',
+    icon: 'fa-shield-halved',
+    sourceRef: 'azrael_engine.rs:41',
+  },
+  {
+    time: 'T+0.004ms',
+    elapsed: '28%',
     label: 'Null pointer guard — PASSED',
-    detail: 'ctx != NULL, payload_ptr != NULL',
+    detail: 'ctx != NULL ✓, payload_ptr != NULL ✓',
     status: 'ok',
     icon: 'fa-check',
+    sourceRef: 'azrael_engine.rs:42-44',
   },
   {
-    time: 'T+0.007ms',
-    label: 'Authority flag check — PASSED',
-    detail: 'authority_flags & 0x01 == 1 (0x00000001)',
+    time: 'T+0.006ms',
+    elapsed: '42%',
+    label: 'slice::from_raw_parts() — payload bound',
+    detail: 'payload = &[u8](29 bytes) — zero-copy FFI slice',
+    status: 'ok',
+    icon: 'fa-link',
+    sourceRef: 'azrael_engine.rs:47',
+  },
+  {
+    time: 'T+0.008ms',
+    elapsed: '57%',
+    label: 'validate_predicate() — authority check',
+    detail: 'authority_flags & 0x01 == 1 (0x00000001) — PASSED',
     status: 'ok',
     icon: 'fa-lock-open',
+    sourceRef: 'azrael_engine.rs:26-29',
   },
   {
-    time: 'T+0.011ms',
-    label: 'Digest verification — FAILED',
-    detail: 'Constant-time comparison detected mismatch at byte offset 0',
-    status: 'fail',
-    icon: 'fa-xmark',
+    time: 'T+0.010ms',
+    elapsed: '71%',
+    label: 'verify_digest() — constant-time comparison',
+    detail: 'subtle::ConstantTimeEq::ct_eq() executing...',
+    status: 'warn',
+    icon: 'fa-fingerprint',
+    sourceRef: 'azrael_engine.rs:21-22',
   },
   {
     time: 'T+0.012ms',
-    label: 'Thread state revocation initiated',
-    detail: '[AZRAEL CONTAINMENT] Revoking thread state. Code: -1',
-    status: 'fail',
+    elapsed: '85%',
+    label: 'DIGEST MISMATCH DETECTED',
+    detail: 'bound≠target at byte offset 0x00 — 7 bytes diverge',
+    status: 'critical',
+    icon: 'fa-xmark',
+    sourceRef: 'azrael_engine.rs:22',
+  },
+  {
+    time: 'T+0.013ms',
+    elapsed: '92%',
+    label: '[AZRAEL CONTAINMENT] Thread state revoked',
+    detail: 'eprintln!("[AZRAEL CONTAINMENT] Revoking thread state. Code: -1")',
+    status: 'critical',
     icon: 'fa-skull',
+    sourceRef: 'azrael_engine.rs:51-53',
   },
   {
     time: 'T+0.014ms',
-    label: 'Ledger record published',
-    detail: 'PASS_PUBLISHED_V1_1 — immutable audit entry written',
-    status: 'warn',
+    elapsed: '100%',
+    label: 'Ledger record sealed — PASS_PUBLISHED_V1_1',
+    detail: 'Immutable audit entry written at chain position #10,492,834',
+    status: 'fail',
     icon: 'fa-book',
   },
 ];
 
-// ── Hex Block Component ─────────────────────────────────────────────
-function HexBlock({ label, hex, highlightIndices, color }: {
-  label: string;
-  hex: string;
-  highlightIndices: number[];
-  color: 'red' | 'cyan';
-}) {
-  const colorClasses = {
-    red: 'bg-red-500/30 text-red-300 border-red-500/50',
-    cyan: 'bg-cyan-500/30 text-cyan-300 border-cyan-500/50',
+// ── Risk Correlation ────────────────────────────────────────────────
+const riskCorrelations = [
+  {
+    metric: 'FAA Compliance',
+    impact: 'CRITICAL',
+    detail: 'Digest mismatch in flight-critical telemetry violates Part 107 data integrity requirements',
+    score: 23,
+    color: 'red',
+  },
+  {
+    metric: 'Data Sovereignty',
+    impact: 'HIGH',
+    detail: 'Unratified header suggests potential payload injection from unauthorized source',
+    score: 41,
+    color: 'orange',
+  },
+  {
+    metric: 'Model Hallucination',
+    impact: 'MEDIUM',
+    detail: 'If digest originates from LLM output, indicates model generated non-deterministic payload',
+    score: 58,
+    color: 'yellow',
+  },
+  {
+    metric: 'Operational Uptime',
+    impact: 'LOW',
+    detail: 'Containment successful — systemd will restart daemon within 5s (RestartSec=5s)',
+    score: 89,
+    color: 'emerald',
+  },
+];
+
+// ── HexDumpTable Component ──────────────────────────────────────────
+function HexDumpViewer() {
+  const [viewMode, setViewMode] = useState<'side-by-side' | 'diff'>('side-by-side');
+  const boundDump = toHexDump(incident.telemetry_event.bound_digest);
+  const targetDump = toHexDump(incident.telemetry_event.target_digest);
+  const byteDiffs = computeByteDiff(
+    incident.telemetry_event.bound_digest,
+    incident.telemetry_event.target_digest,
+  );
+  const mismatchOffsets = new Set(byteDiffs.filter((d) => !d.match).map((d) => d.offset));
+
+  return (
+    <div className="bg-slate-950/80 border border-slate-800 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/40">
+        <div className="flex items-center gap-2">
+          <i className="fa-solid fa-memory text-red-400/60 text-xs"></i>
+          <span className="text-xs text-slate-400 font-mono">HEX DUMP VIEWER</span>
+        </div>
+        <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-0.5">
+          <button
+            onClick={() => setViewMode('side-by-side')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
+              viewMode === 'side-by-side' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            Side-by-Side
+          </button>
+          <button
+            onClick={() => setViewMode('diff')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
+              viewMode === 'diff' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            Byte Diff
+          </button>
+        </div>
+      </div>
+
+      {viewMode === 'side-by-side' ? (
+        <div className="grid grid-cols-2 divide-x divide-slate-800">
+          {/* Bound Digest */}
+          <div className="p-3">
+            <div className="text-xs text-cyan-400/60 font-semibold mb-2 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+              BOUND DIGEST (Expected)
+            </div>
+            <table className="w-full font-mono text-xs">
+              <thead>
+                <tr className="text-slate-600">
+                  <th className="text-left pb-1 w-16">OFFSET</th>
+                  <th className="text-left pb-1">BYTES</th>
+                </tr>
+              </thead>
+              <tbody>
+                {boundDump.map((row) => (
+                  <tr key={row.offset} className="hover:bg-slate-800/30">
+                    <td className="text-slate-600 py-0.5">{row.offset}</td>
+                    <td className="py-0.5">
+                      {row.bytes.map((byte, i) => {
+                        const byteOffset = parseInt(row.offset, 16) + i;
+                        const isMismatch = mismatchOffsets.has(byteOffset);
+                        return (
+                          <span
+                            key={i}
+                            className={`inline-block w-6 text-center ${
+                              isMismatch
+                                ? 'bg-cyan-500/30 text-cyan-200 rounded font-bold'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {byte}
+                          </span>
+                        );
+                      })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Target Digest */}
+          <div className="p-3">
+            <div className="text-xs text-red-400/60 font-semibold mb-2 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400"></span>
+              TARGET DIGEST (Received)
+            </div>
+            <table className="w-full font-mono text-xs">
+              <thead>
+                <tr className="text-slate-600">
+                  <th className="text-left pb-1 w-16">OFFSET</th>
+                  <th className="text-left pb-1">BYTES</th>
+                </tr>
+              </thead>
+              <tbody>
+                {targetDump.map((row) => (
+                  <tr key={row.offset} className="hover:bg-slate-800/30">
+                    <td className="text-slate-600 py-0.5">{row.offset}</td>
+                    <td className="py-0.5">
+                      {row.bytes.map((byte, i) => {
+                        const byteOffset = parseInt(row.offset, 16) + i;
+                        const isMismatch = mismatchOffsets.has(byteOffset);
+                        return (
+                          <span
+                            key={i}
+                            className={`inline-block w-6 text-center ${
+                              isMismatch
+                                ? 'bg-red-500/30 text-red-200 rounded font-bold'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {byte}
+                          </span>
+                        );
+                      })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        /* Byte Diff View */
+        <div className="p-3">
+          <table className="w-full font-mono text-xs">
+            <thead>
+              <tr className="text-slate-600 border-b border-slate-800">
+                <th className="text-left pb-2 w-16">OFFSET</th>
+                <th className="text-left pb-2 w-16">BOUND</th>
+                <th className="text-left pb-2 w-16">TARGET</th>
+                <th className="text-left pb-2">STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byteDiffs.map((d) => (
+                <tr
+                  key={d.offset}
+                  className={`border-b border-slate-800/30 ${
+                    !d.match ? 'bg-red-500/5' : ''
+                  } hover:bg-slate-800/20`}
+                >
+                  <td className="text-slate-600 py-1">
+                    0x{d.offset.toString(16).toUpperCase().padStart(2, '0')}
+                  </td>
+                  <td className={`py-1 ${d.match ? 'text-slate-400' : 'text-cyan-300 font-bold'}`}>
+                    {d.boundByte}
+                  </td>
+                  <td className={`py-1 ${d.match ? 'text-slate-400' : 'text-red-300 font-bold'}`}>
+                    {d.targetByte}
+                  </td>
+                  <td className="py-1">
+                    {d.match ? (
+                      <span className="text-emerald-500">✓ MATCH</span>
+                    ) : (
+                      <span className="text-red-400">✗ DIVERGED</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Summary bar */}
+      <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/40 flex items-center justify-between text-xs">
+        <span className="text-slate-500">
+          {byteDiffs.filter((d) => d.match).length} matched / {byteDiffs.filter((d) => !d.match).length} diverged / {byteDiffs.length} total bytes
+        </span>
+        <span className="text-red-400 font-mono">
+          First divergence: 0x{byteDiffs.find((d) => !d.match)?.offset.toString(16).toUpperCase().padStart(2, '0') ?? 'N/A'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Containment Replay Component ────────────────────────────────────
+function ContainmentReplay() {
+  const [playing, setPlaying] = useState(false);
+  const [currentFrame, setCurrentFrame] = useState(-1);
+  const [completed, setCompleted] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startReplay = () => {
+    setPlaying(true);
+    setCompleted(false);
+    setCurrentFrame(0);
+    let frame = 0;
+    intervalRef.current = setInterval(() => {
+      frame++;
+      if (frame >= replayFrames.length) {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        setPlaying(false);
+        setCompleted(true);
+      } else {
+        setCurrentFrame(frame);
+      }
+    }, 600);
+  };
+
+  const resetReplay = () => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    setPlaying(false);
+    setCurrentFrame(-1);
+    setCompleted(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  const statusColors: Record<string, { bg: string; text: string; border: string }> = {
+    ok: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', border: 'border-emerald-500/30' },
+    warn: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500/30' },
+    fail: { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30' },
+    critical: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30' },
   };
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">{label}</span>
-        <span className="text-xs text-slate-600 font-mono">{hex.length} chars</span>
-      </div>
-      <div className="bg-slate-950/80 rounded-lg p-3 border border-slate-800 font-mono text-sm overflow-x-auto">
-        <div className="flex flex-wrap gap-0">
-          {hex.split('').map((char, i) => (
-            <span
-              key={i}
-              className={`inline-block w-5 text-center transition-all duration-200 ${
-                highlightIndices.includes(i)
-                  ? `${colorClasses[color]} rounded-sm border font-bold`
-                  : 'text-slate-500'
-              }`}
-              title={highlightIndices.includes(i) ? `Offset 0x${i.toString(16).padStart(2, '0')} — MISMATCH` : undefined}
+    <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center">
+            <i className="fa-solid fa-film text-red-400 text-sm"></i>
+          </div>
+          <div>
+            <h3 className="font-bold text-slate-200">Containment Replay</h3>
+            <p className="text-xs text-slate-500">Animated execution trace with source code references</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {completed && (
+            <button
+              onClick={resetReplay}
+              className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-400 hover:text-white transition-all"
             >
-              {char}
-            </span>
-          ))}
+              <i className="fa-solid fa-rotate-left mr-1"></i>
+              Reset
+            </button>
+          )}
+          <button
+            onClick={playing ? resetReplay : startReplay}
+            disabled={playing}
+            className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              playing
+                ? 'bg-red-500/20 border border-red-500/30 text-red-300'
+                : 'bg-red-500/20 border border-red-500/30 text-red-300 hover:bg-red-500/30'
+            }`}
+          >
+            {playing ? (
+              <>
+                <i className="fa-solid fa-spinner fa-spin mr-1"></i>
+                Playing...
+              </>
+            ) : completed ? (
+              <>
+                <i className="fa-solid fa-rotate-right mr-1"></i>
+                Replay
+              </>
+            ) : (
+              <>
+                <i className="fa-solid fa-play mr-1"></i>
+                Start Replay
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div className="px-6 pt-3">
+        <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-emerald-500 via-yellow-500 to-red-500 rounded-full transition-all duration-500"
+            style={{
+              width: currentFrame < 0 ? '0%' : `${((currentFrame + 1) / replayFrames.length) * 100}%`,
+            }}
+          ></div>
+        </div>
+        <div className="flex justify-between mt-1 text-xs text-slate-600">
+          <span>T+0.000ms</span>
+          <span>Frame {Math.max(0, currentFrame + 1)} / {replayFrames.length}</span>
+          <span>T+0.014ms</span>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div className="p-6 max-h-[500px] overflow-y-auto">
+        <div className="relative">
+          <div className="absolute left-5 top-0 bottom-0 w-px bg-slate-800"></div>
+
+          {replayFrames.map((frame, i) => {
+            const isVisible = i <= currentFrame;
+            const isCurrent = i === currentFrame;
+            const colors = statusColors[frame.status];
+
+            return (
+              <div
+                key={i}
+                className={`relative flex items-start gap-4 pl-12 pr-4 py-2.5 rounded-xl transition-all duration-500 ${
+                  isVisible ? 'opacity-100 translate-x-0' : 'opacity-20 translate-x-2'
+                } ${isCurrent ? `${colors.bg} ${colors.border} border` : ''}`}
+              >
+                {/* Node */}
+                <div className={`absolute left-2.5 w-6 h-6 rounded-full flex items-center justify-center z-10 transition-all ${
+                  isVisible ? colors.bg : 'bg-slate-800'
+                } ${isCurrent ? 'ring-2 ring-offset-1 ring-offset-slate-900 ' + colors.border : ''}`}>
+                  <i className={`fa-solid ${frame.icon} text-[9px] ${isVisible ? colors.text : 'text-slate-600'}`}></i>
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3 mb-0.5">
+                    <span className="text-xs text-slate-600 font-mono w-16 shrink-0">{frame.time}</span>
+                    <span className={`text-sm font-medium ${isVisible ? colors.text : 'text-slate-600'}`}>
+                      {frame.label}
+                    </span>
+                  </div>
+                  <p className={`text-xs ml-[4.75rem] ${isVisible ? 'text-slate-400' : 'text-slate-700'}`}>
+                    {frame.detail}
+                  </p>
+                  {frame.sourceRef && isVisible && (
+                    <div className="ml-[4.75rem] mt-1">
+                      <span className="text-[10px] text-slate-600 font-mono bg-slate-800/60 px-1.5 py-0.5 rounded">
+                        <i className="fa-solid fa-code mr-1 text-[8px]"></i>
+                        {frame.sourceRef}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -129,48 +528,47 @@ function HexBlock({ label, hex, highlightIndices, color }: {
 
 // ── Main Component ──────────────────────────────────────────────────
 export default function AzraelIncidentLog() {
-  const [showTimeline, setShowTimeline] = useState(false);
-  const [activeStep, setActiveStep] = useState<number | null>(null);
-  const [hexView, setHexView] = useState<'inline' | 'column'>('inline');
+  const [showContent, setShowContent] = useState(false);
+  const [activeTab, setActiveTab] = useState<'forensics' | 'replay' | 'correlation'>('forensics');
 
   useEffect(() => {
-    const timer = setTimeout(() => setShowTimeline(true), 300);
+    const timer = setTimeout(() => setShowContent(true), 300);
     return () => clearTimeout(timer);
   }, []);
 
-  const { diffs, mismatchCount, firstMismatch, lastMismatch } = analyzeDigestDiff(
+  const byteDiffs = computeByteDiff(
     incident.telemetry_event.bound_digest,
     incident.telemetry_event.target_digest,
   );
-
-  const mismatchIndices = diffs.filter((d) => !d.match).map((d) => d.index);
+  const mismatchCount = byteDiffs.filter((d) => !d.match).length;
+  const firstMismatch = byteDiffs.find((d) => !d.match);
 
   return (
     <section id="incident" className="py-24 px-6 bg-gradient-to-b from-slate-950 via-red-950/5 to-slate-950">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="text-center mb-16">
+        <div className={`text-center mb-16 transition-all duration-700 ${showContent ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
           <div className="inline-flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-full px-4 py-2 mb-6">
             <span className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></span>
-            <span className="text-sm text-red-300 font-medium">RUNTIME INCIDENT — SEQUENCE #{incident.sts_sequence_id}</span>
+            <span className="text-sm text-red-300 font-medium">RUNTIME INCIDENT — SEQUENCE #{incident.sts_sequence_id.toLocaleString()}</span>
           </div>
           <h2 className="text-4xl font-bold mt-3 mb-4">
             <span className="bg-gradient-to-r from-red-400 via-red-300 to-orange-300 bg-clip-text text-transparent">
-              Digest Mismatch Event
+              Digest Mismatch Forensic Report
             </span>
           </h2>
           <p className="text-slate-400 max-w-2xl mx-auto">
-            Forensic reconstruction of Azrael runtime containment event. Thread revoked at T+0.012ms 
-            after constant-time digest comparison detected payload tampering.
+            Full forensic reconstruction of Azrael runtime containment event. Thread revoked at T+0.014ms 
+            after constant-time digest comparison detected {mismatchCount} diverged bytes.
           </p>
         </div>
 
         {/* Status Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-10">
+        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 mb-10 transition-all duration-700 delay-100 ${showContent ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
           <div className="bg-slate-900/60 border border-red-500/20 rounded-xl p-5">
             <div className="text-xs text-slate-500 mb-1">Status Code</div>
             <div className="text-2xl font-bold font-mono text-red-400">{incident.status_code}</div>
-            <div className="text-xs text-red-400/70 mt-1 font-mono">{incident.status_label}</div>
+            <div className="text-[10px] text-red-400/70 mt-1 font-mono truncate">{incident.status_label}</div>
           </div>
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
             <div className="text-xs text-slate-500 mb-1">Sequence ID</div>
@@ -188,164 +586,173 @@ export default function AzraelIncidentLog() {
           <div className="bg-slate-900/60 border border-orange-500/20 rounded-xl p-5">
             <div className="text-xs text-slate-500 mb-1">Ratification</div>
             <div className="text-lg font-bold text-orange-400">REJECTED</div>
-            <div className="text-xs text-orange-400/70 mt-1 font-mono">UNRATIFIED_HEADER</div>
+            <div className="text-[10px] text-orange-400/70 mt-1 font-mono">UNRATIFIED_HEADER</div>
           </div>
         </div>
 
-        {/* Digest Comparison */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden mb-10">
-          <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center">
-                <i className="fa-solid fa-fingerprint text-red-400 text-sm"></i>
-              </div>
-              <div>
-                <h3 className="font-bold text-slate-200">Digest Forensic Comparison</h3>
-                <p className="text-xs text-slate-500">{mismatchCount} byte{mismatchCount !== 1 ? 's' : ''} differ — first divergence at offset 0x{firstMismatch.toString(16).padStart(2, '0')}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
+        {/* Tab Switcher */}
+        <div className={`flex justify-center mb-8 transition-all duration-700 delay-200 ${showContent ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-1 flex gap-1">
+            {[
+              { id: 'forensics' as const, label: 'Hex Forensics', icon: 'fa-fingerprint' },
+              { id: 'replay' as const, label: 'Containment Replay', icon: 'fa-film' },
+              { id: 'correlation' as const, label: 'Risk Correlation', icon: 'fa-chart-line' },
+            ].map((tab) => (
               <button
-                onClick={() => setHexView('inline')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  hexView === 'inline' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === tab.id
+                    ? 'bg-red-500/20 text-red-300'
+                    : 'text-slate-400 hover:text-white'
                 }`}
               >
-                Inline
+                <i className={`fa-solid ${tab.icon} mr-2`}></i>
+                {tab.label}
               </button>
-              <button
-                onClick={() => setHexView('column')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  hexView === 'column' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'
-                }`}
-              >
-                Column
-              </button>
-            </div>
-          </div>
-
-          <div className="p-6">
-            {hexView === 'inline' ? (
-              <div className="space-y-6">
-                <HexBlock
-                  label="Bound Digest (Expected)"
-                  hex={incident.telemetry_event.bound_digest}
-                  highlightIndices={mismatchIndices}
-                  color="cyan"
-                />
-                <HexBlock
-                  label="Target Digest (Received)"
-                  hex={incident.telemetry_event.target_digest}
-                  highlightIndices={mismatchIndices}
-                  color="red"
-                />
-                {/* Diff summary bar */}
-                <div className="bg-slate-950/60 rounded-lg p-3 border border-slate-800">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs text-slate-500">Diff map:</span>
-                    <span className="text-xs text-slate-600 font-mono">
-                      [{firstMismatch}..{lastMismatch}] — {mismatchCount} mismatches in {diffs.length} chars
-                    </span>
-                  </div>
-                  <div className="flex h-3 rounded-full overflow-hidden">
-                    {diffs.map((d, i) => (
-                      <div
-                        key={i}
-                        className={`flex-1 ${d.match ? 'bg-emerald-500/40' : 'bg-red-500/80'}`}
-                        title={d.match ? `Match at 0x${i.toString(16)}` : `Mismatch at 0x${i.toString(16)}`}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="bg-slate-950/80 rounded-lg p-4 border border-slate-800 font-mono text-sm">
-                <div className="grid grid-cols-[auto_1fr_1fr_auto] gap-x-4 gap-y-0.5">
-                  <span className="text-slate-600 text-xs">OFFSET</span>
-                  <span className="text-cyan-400/60 text-xs">BOUND</span>
-                  <span className="text-red-400/60 text-xs">TARGET</span>
-                  <span className="text-slate-600 text-xs">STATUS</span>
-                  {diffs.map((d) => (
-                    <>
-                      <span key={`o-${d.index}`} className="text-slate-600 text-xs">
-                        0x{d.index.toString(16).padStart(2, '0')}
-                      </span>
-                      <span key={`b-${d.index}`} className={d.match ? 'text-slate-400' : 'text-cyan-300 font-bold'}>
-                        {d.boundChar}
-                      </span>
-                      <span key={`t-${d.index}`} className={d.match ? 'text-slate-400' : 'text-red-300 font-bold'}>
-                        {d.targetChar}
-                      </span>
-                      <span key={`s-${d.index}`} className={`text-xs ${d.match ? 'text-emerald-500' : 'text-red-400'}`}>
-                        {d.match ? '✓' : '✗'}
-                      </span>
-                    </>
-                  ))}
-                </div>
-              </div>
-            )}
+            ))}
           </div>
         </div>
 
-        {/* Execution Timeline */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden mb-10">
-          <div className="px-6 py-4 border-b border-slate-800 flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-orange-500/20 flex items-center justify-center">
-              <i className="fa-solid fa-timeline text-orange-400 text-sm"></i>
-            </div>
-            <div>
-              <h3 className="font-bold text-slate-200">Execution Timeline</h3>
-              <p className="text-xs text-slate-500">Full trace from invocation to containment — 0.014ms total</p>
-            </div>
-          </div>
-
-          <div className="p-6">
-            <div className="relative">
-              {/* Vertical line */}
-              <div className="absolute left-5 top-0 bottom-0 w-px bg-slate-800"></div>
-
-              <div className="space-y-1">
-                {timelineSteps.map((step, i) => {
-                  const statusColors = {
-                    ok: { bg: 'bg-emerald-500/20', border: 'border-emerald-500/30', text: 'text-emerald-400', icon: 'text-emerald-400' },
-                    warn: { bg: 'bg-orange-500/20', border: 'border-orange-500/30', text: 'text-orange-400', icon: 'text-orange-400' },
-                    fail: { bg: 'bg-red-500/20', border: 'border-red-500/30', text: 'text-red-400', icon: 'text-red-400' },
-                  };
-                  const colors = statusColors[step.status];
-
-                  return (
-                    <div
-                      key={i}
-                      onMouseEnter={() => setActiveStep(i)}
-                      onMouseLeave={() => setActiveStep(null)}
-                      className={`relative flex items-start gap-4 pl-12 pr-4 py-3 rounded-xl transition-all cursor-pointer ${
-                        activeStep === i ? 'bg-slate-800/40' : ''
-                      } ${showTimeline ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4'}`}
-                      style={{ transitionDelay: `${i * 100}ms` }}
-                    >
-                      {/* Node */}
-                      <div className={`absolute left-2.5 w-5 h-5 rounded-full ${colors.bg} border ${colors.border} flex items-center justify-center z-10`}>
-                        <i className={`fa-solid ${step.icon} text-[8px] ${colors.icon}`}></i>
-                      </div>
-
-                      {/* Content */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3 mb-1">
-                          <span className="text-xs text-slate-600 font-mono w-20 shrink-0">{step.time}</span>
-                          <span className={`text-sm font-medium ${colors.text}`}>{step.label}</span>
-                        </div>
-                        <p className="text-xs text-slate-500 ml-[5.25rem]">{step.detail}</p>
-                      </div>
+        {/* Tab Content */}
+        <div className={`transition-all duration-500 ${showContent ? 'opacity-100' : 'opacity-0'}`}>
+          {activeTab === 'forensics' && (
+            <div className="space-y-6">
+              {/* Quick digest comparison */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2">
+                  <i className="fa-solid fa-code-compare text-red-400"></i>
+                  Raw Digest Comparison
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <div className="text-xs text-cyan-400/60 font-semibold mb-2">BOUND (Expected)</div>
+                    <div className="bg-slate-950/80 rounded-lg p-3 border border-slate-800 font-mono text-sm break-all">
+                      {incident.telemetry_event.bound_digest.split('').map((c, i) => {
+                        const byteIdx = Math.floor(i / 2);
+                        const isMismatch = byteDiffs[byteIdx] && !byteDiffs[byteIdx].match;
+                        return (
+                          <span key={i} className={isMismatch ? 'bg-cyan-500/30 text-cyan-200 rounded px-px' : 'text-slate-400'}>
+                            {c}
+                          </span>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  </div>
+                  <div>
+                    <div className="text-xs text-red-400/60 font-semibold mb-2">TARGET (Received)</div>
+                    <div className="bg-slate-950/80 rounded-lg p-3 border border-slate-800 font-mono text-sm break-all">
+                      {incident.telemetry_event.target_digest.split('').map((c, i) => {
+                        const byteIdx = Math.floor(i / 2);
+                        const isMismatch = byteDiffs[byteIdx] && !byteDiffs[byteIdx].match;
+                        return (
+                          <span key={i} className={isMismatch ? 'bg-red-500/30 text-red-200 rounded px-px font-bold' : 'text-slate-400'}>
+                            {c}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+                {/* Diff summary */}
+                <div className="mt-4 flex items-center gap-4 text-xs">
+                  <span className="text-slate-500">
+                    <span className="text-red-400 font-bold">{mismatchCount}</span> bytes diverged
+                  </span>
+                  <span className="text-slate-500">
+                    First at offset <span className="text-red-400 font-mono">0x{firstMismatch?.offset.toString(16).toUpperCase().padStart(2, '0')}</span>
+                  </span>
+                  <span className="text-slate-500">
+                    Constant-time: <span className="text-emerald-400">YES</span> (no early exit)
+                  </span>
+                </div>
+              </div>
+
+              {/* Full Hex Dump */}
+              <HexDumpViewer />
+            </div>
+          )}
+
+          {activeTab === 'replay' && (
+            <ContainmentReplay />
+          )}
+
+          {activeTab === 'correlation' && (
+            <div className="space-y-6">
+              {/* Risk Impact Grid */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2">
+                  <i className="fa-solid fa-chart-line text-orange-400"></i>
+                  Risk Metric Impact Analysis
+                </h3>
+                <p className="text-sm text-slate-400 mb-6">
+                  How this digest mismatch event correlates to the priced-in risk metrics from Section 2.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {riskCorrelations.map((rc) => {
+                    const colorMap: Record<string, { bar: string; text: string; bg: string; border: string }> = {
+                      red: { bar: 'from-red-500 to-red-400', text: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/20' },
+                      orange: { bar: 'from-orange-500 to-orange-400', text: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/20' },
+                      yellow: { bar: 'from-yellow-500 to-yellow-400', text: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/20' },
+                      emerald: { bar: 'from-emerald-500 to-emerald-400', text: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' },
+                    };
+                    const colors = colorMap[rc.color];
+
+                    return (
+                      <div key={rc.metric} className={`rounded-xl p-5 border ${colors.border} ${colors.bg}`}>
+                        <div className="flex items-center justify-between mb-3">
+                          <h4 className="font-bold text-slate-200">{rc.metric}</h4>
+                          <span className={`text-xs px-2 py-0.5 rounded ${colors.bg} ${colors.text} border ${colors.border}`}>
+                            {rc.impact}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 mb-3">{rc.detail}</p>
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full bg-gradient-to-r ${colors.bar} rounded-full`}
+                              style={{ width: `${rc.score}%` }}
+                            ></div>
+                          </div>
+                          <span className={`text-sm font-bold font-mono ${colors.text}`}>{rc.score}%</span>
+                        </div>
+                        <div className="text-[10px] text-slate-600 mt-1">residual assurance score post-incident</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Cross-reference to deployment */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2">
+                  <i className="fa-solid fa-link text-cyan-400"></i>
+                  Containment → Deployment Response
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/50">
+                    <div className="text-xs text-slate-500 mb-1">Daemon Response</div>
+                    <div className="text-sm text-slate-200 font-medium">Watchdog ping suppressed</div>
+                    <div className="text-xs text-slate-500 mt-1">No sd_notify("WATCHDOG=1") issued</div>
+                  </div>
+                  <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/50">
+                    <div className="text-xs text-slate-500 mb-1">Systemd Action</div>
+                    <div className="text-sm text-slate-200 font-medium">Process containment triggered</div>
+                    <div className="text-xs text-slate-500 mt-1">WatchdogSec=10s timeout → SIGABRT</div>
+                  </div>
+                  <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/50">
+                    <div className="text-xs text-slate-500 mb-1">Recovery</div>
+                    <div className="text-sm text-slate-200 font-medium">Restart in 5 seconds</div>
+                    <div className="text-xs text-slate-500 mt-1">Restart=on-failure, RestartSec=5s</div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* Ledger & Authority State */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Authority & Ledger (always visible) */}
+        <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 mt-10 transition-all duration-700 delay-300 ${showContent ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
           {/* Authority Flags */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
             <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2">
@@ -355,6 +762,16 @@ export default function AzraelIncidentLog() {
             <div className="bg-slate-950/80 rounded-lg p-4 border border-slate-800 mb-4">
               <div className="font-mono text-lg text-cyan-300 tracking-widest text-center">
                 {incident.telemetry_event.authority_flags}
+              </div>
+              <div className="flex justify-center gap-1 mt-2">
+                {incident.telemetry_event.authority_flags.slice(2).split('').map((hex, i) => (
+                  <div key={i} className="text-center">
+                    <div className="w-8 h-8 bg-slate-800 rounded flex items-center justify-center font-mono text-sm text-cyan-300 border border-slate-700">
+                      {parseInt(hex, 16).toString(2).padStart(4, '0')}
+                    </div>
+                    <div className="text-[9px] text-slate-600 mt-1">bit {7 - i * 2}-{4 - i * 2}</div>
+                  </div>
+                ))}
               </div>
             </div>
             <div className="space-y-2">
@@ -404,7 +821,7 @@ export default function AzraelIncidentLog() {
                 </div>
                 <div className="bg-slate-900/60 rounded-lg p-2">
                   <span className="text-slate-500">Chain Position</span>
-                  <div className="text-slate-300 font-medium mt-0.5 font-mono">#10,492,834</div>
+                  <div className="text-slate-300 font-medium mt-0.5 font-mono">#{incident.sts_sequence_id.toLocaleString()}</div>
                 </div>
                 <div className="bg-slate-900/60 rounded-lg p-2">
                   <span className="text-slate-500">Finality</span>
@@ -414,18 +831,19 @@ export default function AzraelIncidentLog() {
             </div>
             <div className="text-xs text-slate-500 flex items-center gap-2">
               <i className="fa-solid fa-shield-halved text-indigo-400/50"></i>
-              Record is cryptographically sealed and cannot be modified or deleted
+              Record is cryptographically sealed — cannot be modified or deleted
             </div>
           </div>
         </div>
 
         {/* Raw JSON */}
-        <div className="mt-10 bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden">
-          <details className="group">
+        <div className={`mt-10 transition-all duration-700 delay-500 ${showContent ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
+          <details className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden group">
             <summary className="px-6 py-4 cursor-pointer flex items-center justify-between hover:bg-slate-800/30 transition-colors">
               <div className="flex items-center gap-3">
                 <i className="fa-solid fa-code text-slate-500"></i>
                 <span className="text-sm text-slate-400 font-medium">Raw Incident JSON</span>
+                <span className="text-xs text-slate-600 font-mono">application/json</span>
               </div>
               <i className="fa-solid fa-chevron-down text-slate-600 text-xs group-open:rotate-180 transition-transform"></i>
             </summary>

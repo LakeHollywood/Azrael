@@ -1,0 +1,41 @@
+[Unit]
+Description=SAIL / AZRAEL Continuous Telemetry Ingestion Daemon
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/sail_telemetry_daemon --config /etc/sail/config.toml
+
+Restart=on-failure
+RestartSec=5s
+# Type=notify: give the daemon room to emit READY=1 after slow DNS/network.
+TimeoutStartSec=60s
+
+# Systemd Watchdog Integration
+WatchdogSec=10s
+
+# Isolation and Security Capabilities
+User=sail
+Group=sail
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/log/sail /run/sail /var/run/sail
+
+# State paths must exist before the unprivileged service starts (ProtectSystem=strict
+# makes everything outside ReadWritePaths read-only, including implicit directory creation).
+StateDirectory=sail
+LogsDirectory=sail
+RuntimeDirectory=sail
+
+[Install]
+WantedBy=multi-user.target

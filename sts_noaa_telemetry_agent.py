@@ -16,10 +16,23 @@ import hashlib
 import logging
 import requests
 
+# Agent/task separation (see task_runner.py): this module now defines the
+# AGENT (identity, config, lifecycle, watchdog supervision) while each feed
+# poll is a discrete, timeout-bounded, retryable, audited TASK. The pure
+# functions fetch_noaa/bind_and_buffer/verify_telemetry_integrity remain the
+# task bodies and are unchanged — only the loop structure moved from "one
+# monolithic daemon function" to "agent running registered tasks".
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from task_runner import Agent, Task, TaskPolicy, TaskStatus  # noqa: E402
+
 NOAA_ENDPOINTS = {
     "GOES_MAG": "https://services.swpc.noaa.gov/json/goes/primary/magnetometers-7-day.json",
     "DSCOVR_MAG": "https://services.swpc.noaa.gov/json/dscovr/dscovr_mag_1s.json"
 }
+
+AGENT_ID = "sts-noaa-telemetry"
+POLL_INTERVAL_SECONDS = 10.0
+FETCH_TIMEOUT_SECONDS = 3.0
 
 DB_PATH = os.path.expanduser("~/sts_telemetry_buffer.db")
 LOG_PATH = os.path.expanduser("~/sts_noaa_ingestion.log")
@@ -153,41 +166,77 @@ def verify_telemetry_integrity(record, mono_ts, utc_ts, expected_hash):
     return True
 
 
+def make_ingest_task(name: str, url: str) -> Task:
+    """Build the bounded TASK for one NOAA feed.
+
+    The task body keeps the historical semantics exactly: fetch (with jitter
+    measurement), bind+buffer on success; a None record means the feed was
+    unreachable and is reported as a failed attempt so the AGENT (not the
+    task) decides backoff/watchdog behaviour. Timeout matches the old
+    requests timeout so a hung feed can never stall the cycle.
+    """
+
+    def _ingest() -> dict:
+        record, jitter, mono_ts = fetch_noaa(name, url)
+        if record is None:
+            raise RuntimeError(f"[{name}] ingestion returned no record")
+        bind_and_buffer(name, record, jitter, mono_ts)
+        return {"endpoint": name, "jitter_ms": round(jitter * 1000, 3)}
+
+    return Task(
+        f"ingest:{name}",
+        _ingest,
+        policy=TaskPolicy(timeout_seconds=FETCH_TIMEOUT_SECONDS + 1.0, max_attempts=1),
+        description=f"Poll and buffer one sample from the {name} feed",
+    )
+
+
+def build_agent(agent_id: str = AGENT_ID) -> Agent:
+    """Construct the STS telemetry AGENT with its feed tasks registered."""
+    agent = Agent(agent_id, name="STS NOAA Telemetry Agent", roles=("telemetry", "ingestion"))
+    agent.register(*(make_ingest_task(n, u) for n, u in NOAA_ENDPOINTS.items()))
+    return agent
+
+
 def daemon_loop():
-    """Continuous execution loop with dynamic watchdog backoff and systemd keep-alive."""
-    poll_interval = 10.0
+    """Agent supervision loop: runs the registered ingest tasks each cycle.
+
+    Backoff logic lives here (agent responsibility); per-feed fetch/bind
+    lives in the tasks. A cycle succeeds if any task succeeded.
+    """
+    poll_interval = POLL_INTERVAL_SECONDS
     backoff = 1.0
     max_backoff = 300.0
 
+    agent = build_agent()
+    agent.start()
     sd_notify("READY=1\nSTATUS=STS NOAA Ingestion Daemon Active")
     print("=== STS NOAA Ingestion Daemon Started ===")
 
-    while True:
-        cycle_success = False
+    try:
+        while True:
+            results = agent.run_cycle()
+            cycle_success = any(r.ok for r in results.values())
 
-        for name, url in NOAA_ENDPOINTS.items():
-            record, jitter, mono_ts = fetch_noaa(name, url)
-            if record:
-                bind_and_buffer(name, record, jitter, mono_ts)
-                cycle_success = True
+            # Ping systemd watchdog keep-alive signal
+            sd_notify("WATCHDOG=1")
 
-        # Ping systemd watchdog keep-alive signal
-        sd_notify("WATCHDOG=1")
-
-        if cycle_success:
-            backoff = 1.0
-            time.sleep(poll_interval)
-        else:
-            # Dynamically cap sleep to half of WATCHDOG_USEC (or 15s fallback)
-            # BEFORE sleeping so the watchdog ping cadence never exceeds
-            # WatchdogSec — otherwise systemd would kill the daemon during a
-            # network dip and defeat the whole backoff strategy.
-            max_safe = get_max_safe_backoff(default_cap=15.0)
-            safe_backoff = min(backoff, max_safe)
-            logging.warning(f"Ingestion failed on all feeds. Backing off for {safe_backoff:.1f}s")
-            print(f"[STS DAEMON] Network/Ingestion Dip. Retrying in {safe_backoff:.1f}s...")
-            time.sleep(safe_backoff)
-            backoff = min(backoff * 2.0, max_backoff)
+            if cycle_success:
+                backoff = 1.0
+                time.sleep(poll_interval)
+            else:
+                # Dynamically cap sleep to half of WATCHDOG_USEC (or 15s fallback)
+                # BEFORE sleeping so the watchdog ping cadence never exceeds
+                # WatchdogSec — otherwise systemd would kill the daemon during a
+                # network dip and defeat the whole backoff strategy.
+                max_safe = get_max_safe_backoff(default_cap=15.0)
+                safe_backoff = min(backoff, max_safe)
+                logging.warning(f"Ingestion failed on all feeds. Backing off for {safe_backoff:.1f}s")
+                print(f"[STS DAEMON] Network/Ingestion Dip. Retrying in {safe_backoff:.1f}s...")
+                time.sleep(safe_backoff)
+                backoff = min(backoff * 2.0, max_backoff)
+    finally:
+        agent.stop()
 
 
 if __name__ == "__main__":

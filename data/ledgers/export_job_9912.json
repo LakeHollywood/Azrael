@@ -19,8 +19,6 @@
     "payload_hash": "sha256:3a50e3088f9334169161d32342bdc46a5023cc57e6107cdb3dbf10b3e3394985",
     "current_hash": "sha256:b03192c8f883c7cc629536cd97f35acfa623be0692ef8f53cc4dd54e9da530e6",
     "signature": "ed25519:X3v4ZAiyXZoghFmymP3ywfq8z9Jtj7U4p-DojeovXeREExH29aza0lOTWAMir2SqqYSWtV-TCYPTw7eX8F6IAg=="
-    "current_hash": "sha256:ca65feabda07a361e9def32fc7f107b7b690bb29de3c08de32cca27a6f1ce39a",
-    "signature": "ed25519:w8XsvehY82Iati82Q4P781o30XgeAl6P-vs94qMrCpGy9pccg6MijQZ42y1poaa92xUbeFzZjAVQc6pa7QnHAA=="
   },
   {
     "ledger_id": "log_export_executing_7731",
@@ -29,7 +27,6 @@
     "lifecycle_state": "EXECUTING",
     "timestamp": "2026-10-15T15:30:00Z",
     "previous_ledger_hash": "sha256:b03192c8f883c7cc629536cd97f35acfa623be0692ef8f53cc4dd54e9da530e6",
-    "previous_ledger_hash": "sha256:ca65feabda07a361e9def32fc7f107b7b690bb29de3c08de32cca27a6f1ce39a",
     "payload": {
       "action": "export_start",
       "job_id": "export_job_9912",
@@ -38,8 +35,6 @@
     "payload_hash": "sha256:312e7a30006c73b10895c84699def26e9008f65a6cdab0606d556d6969379642",
     "current_hash": "sha256:4ab410d50e7481e2884e70f6d5802229a86e808e00b933c7a607717b2729db88",
     "signature": "ed25519:SjtOSuFCbLR5sqEfNhjvmrxsyH4MK06yPqccAE_4TxCI0BIIa6k-XC3Z6XTqGfd6GuLBeYE1oTFAP7jx-GTBBw=="
-    "current_hash": "sha256:b4f6016646fc3f61fb5f011eaec10a0a7db8a695baaddabf31964aeed282120e",
-    "signature": "ed25519:jlJkoGSK4XxQfpRqxcrUk31IjnnH1qEVJOJV9KpKQlF6L6b1hfoNo9rWuMuhT5_FwAestWKIJdK1weduvOAKAw=="
   },
   {
     "ledger_id": "log_export_7732",
@@ -48,7 +43,6 @@
     "lifecycle_state": "RESOLVED",
     "timestamp": "2026-10-15T15:45:00Z",
     "previous_ledger_hash": "sha256:4ab410d50e7481e2884e70f6d5802229a86e808e00b933c7a607717b2729db88",
-    "previous_ledger_hash": "sha256:b4f6016646fc3f61fb5f011eaec10a0a7db8a695baaddabf31964aeed282120e",
     "payload": {
       "action": "export_compressed",
       "requested_by": "agent_x",
@@ -68,7 +62,5 @@
     "payload_hash": "sha256:c7f2d9500dc1940560d71a4ec31f061fcb8770f2ed7f8cd84d15ae006657d629",
     "current_hash": "sha256:e947d11639cf72e8302dfed8d289c4200c9b774c7dc8748b8b41ab0d7d8b4a99",
     "signature": "ed25519:7xf07SmPW1EpC2EkEAOOy2ldzN6r6fsT2ezyUw6KydJg9iGOq6FOKGL85BcBcWy6babkoTnSiNyNxR6rajvDDg=="
-    "current_hash": "sha256:7ed1491114e6f51e44ecb3322fe6170bc876b69b38279cce1118d00d35cc4d9d",
-    "signature": "ed25519:HL1Y5QYi4WXI8SN8DI1kV2gW-DXQDVF-ML_oTZrGnR7ARffwODMxpOLM85W39FhAhHVCvRXUkMRdTfXp3O7hDg=="
   }
 ]

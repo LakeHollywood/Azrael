@@ -156,6 +156,16 @@ def _env_keys():
     Returns None when neither variable is set (so callers fall back to dev
     key material) and (None, None) when they are present but malformed —
     fail closed either way.
+def _dev_keys():
+    """Return (hmac_secret_bytes, ed25519_pubkey_b64) or (None, None).
+
+    This reads the two files scripts/generate_dev_ledger_keys.py creates:
+    .ledgerdev/secret (raw HMAC-SHA256 secret bytes) and .ledgerdev/pub.b64
+    (base64url Ed25519 public key).
+
+    Resolution order: environment variables first (production/CI), then the
+    gitignored .ledgerdev/ files (local development).  Fail closed: callers
+    must refuse verification when either half is missing.
     """
     secret_b64 = os.environ.get(ENV_HMAC_SECRET_B64)
     pubkey = os.environ.get(ENV_PUBKEY_B64)
@@ -470,11 +480,6 @@ class LedgerAPI:
             _audit("verify.rejected", tenant=tenant, outcome="rejected",
                    resource="verify", details={"error": "unknown_tenant"})
             return 404, {"error": "unknown_tenant", "tenant": tenant}
-        secret, pubkey = _verification_keys()
-        # Verification responses always use the same contract:
-        #   {"verified": bool, "errors": [str, ...], "entries_checked": int}
-        # with HTTP 200 whenever a verdict was produced (including failure
-        # verdicts). 503 is reserved for transport-level unavailability only.
         secret, pubkey = _dev_keys()
         if secret is None or pubkey is None:
             _audit("verify.unavailable", tenant=tenant, outcome="unavailable",

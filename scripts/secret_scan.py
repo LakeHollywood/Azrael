@@ -65,6 +65,16 @@ INTEGRITY_LINE = re.compile(
     r'"integrity"\s*:\s*"(?:sha512|sha456|sha384|sha256)-[A-Za-z0-9+/=]{32,}"')
 SIGNATURE_LINE = re.compile(
     r'"signature"\s*:\s*"ed25519:[A-Za-z0-9+/_=-]{32,}"')
+# Audit-chain hash fields (prev_hash / entry_hash) are deterministic SHA-256
+# values derived from the log content itself, not credentials. They sit on the
+# same JSONL line as words like "HMAC" or "signing" that appear inside verify
+# failure messages, which trips the hex-near-secret-keyword heuristic. Masking
+# these known fields keeps real secrets on audit lines detectable while
+# removing the guaranteed false positives. The `sha256:` prefix form that
+# appears inside error-message strings is equally credential-free.
+AUDIT_HASH_FIELD = re.compile(
+    r'"(?:prev_hash|entry_hash)"\s*:\s*"[0-9a-fA-F]+"'
+    r"|sha256:[0-9a-fA-F]+")
 
 # URLs are credential-free by construction; the b64 alphabet overlaps with URL
 # paths (e.g. tidelift funding links in package-lock.json), so mask them out.
@@ -116,6 +126,7 @@ def scan_content(rel_path: str, data: bytes):
         # Strip known credential-free high-entropy contexts before heuristics.
         line = INTEGRITY_LINE.sub('""', line)
         line = SIGNATURE_LINE.sub('""', line)
+        line = AUDIT_HASH_FIELD.sub('"hash_field"', line)
         line = URL_RE.sub("URL", line)
         for pat, label in LITERAL_PATTERNS:
             if re.search(pat, line):

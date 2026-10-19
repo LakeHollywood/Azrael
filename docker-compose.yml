@@ -1,0 +1,83 @@
+version: "3.9"
+
+# ============================================================================
+# STS / SEAL — Containerized Validation Harness
+# ----------------------------------------------------------------------------
+# Adapted from the proposed PostgreSQL + Kafka compose sketch to match the
+# ACTUAL Sovereign Time System architecture, which is deliberately free of
+# external infrastructure dependencies (that is the core TC4 resilience
+# claim: agents must survive total network partition with zero state loss).
+#
+#   * Ledger State     : append-only, SHA-256 hash-chained SQLite ledger
+#                        (bench/sts_time.py::AssuranceLedger, WAL mode) —
+#                        NOT Postgres. A Postgres/Kafka dependency would
+#                        reintroduce the exact remote-clock and broker-
+#                        availability attack surface STS rejects.
+#   * Pipelines        : in-process bounded queues + local spool buffer
+#                        (bench/tc4_network_adversary.py) — NOT Kafka.
+#   * Test Runner      : pytest against tests/ledger/ and tests/pipelines/,
+#                        plus the full 4-phase orchestrator.
+#
+# The `postgres` and `kafka` services are retained as OPTIONAL negative-
+# control fixtures: the suite proves the agents never depend on them
+# (they can be stopped mid-run with no effect on ledger seals or ordering).
+# ============================================================================
+
+services:
+  # 1. Optional negative-control DB. The STS ledger does NOT use this; it is
+  #    present only so tests/ledger/test_no_external_dependency.py can prove
+  #    independence by killing it under load.
+  ledger-db:
+    image: postgres:15-alpine
+    profiles: ["adversarial-controls"]          # opt-in: docker compose --profile adversarial-controls up
+    environment:
+      POSTGRES_DB: ledger_test
+      POSTGRES_USER: validator
+      POSTGRES_PASSWORD: securepassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db-init:/docker-entrypoint-initdb.d   # Seed schema/migrations
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U validator -d ledger_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Optional negative-control broker (same rationale as above).
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    profiles: ["adversarial-controls"]
+    environment:
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    ports:
+      - "9092:9092"
+
+  # 3. The Validation Test Runner — executes the STS benchmark suite and the
+  #    ledger/pipeline regression tests inside an isolated container.
+  test-runner:
+    image: python:3.11-slim
+    volumes:
+      - ./:/app
+      - bench-data:/app/bench/data              # persistent ledgers across runs
+    working_dir: /app
+    environment:
+      - PYTHONPATH=/app
+      - STS_BENCH_DIR=/tmp/sts_bench
+      # Exposed for the negative-control tests ONLY — asserts non-use:
+      - DB_URL=postgresql://validator:securepassword@ledger-db:5432/ledger_test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements-dev.txt &&
+             pytest tests/ledger/ tests/pipelines/ -v --tb=short &&
+             python3 -m bench.run_benchmark --quick"
+    depends_on:
+      ledger-db:
+        condition: service_started               # NOT service_healthy on purpose:
+      kafka:                                     # the suite must pass even if these
+        condition: service_started               # never become ready (partition proof)
+
+volumes:
+  bench-data:

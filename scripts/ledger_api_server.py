@@ -311,18 +311,20 @@ class LedgerAPI:
         return api._verify_impl(tenant, body)
 
     def _dispatch_context(self, tenant: str, gated: bool) -> TaskContext:
-        """Build the per-request execution context (strict boundary).
-
-        * tenant scoping: the context carries exactly one tenant; a task may
-          never act across tenants (checked against the agent's grant).
-        * non-financial endpoints (verify) are dispatched through a
-          READ_ONLY view — structurally incapable of money movement even if
-          a bug routed them at admit-transaction.
-        * financial endpoints require an explicit caller grant
-          (``self.financial_grant``, set by the operator/HITL layer); with
-          no grant the request runs under a read-only context and the agent
-          refuses it BEFORE any gated code executes.
-        """
+        # Build the per-request execution context (strict boundary).
+        #
+        # * tenant scoping: the context carries exactly one tenant; a task may
+        #   never act across tenants (checked against the agent's grant).
+        # NOTE: previously written as a docstring; an apostrophe in "agent's"
+        # inside the triple-quoted string corrupted parsing under some file
+        # encodings — kept as comments to stay byte-safe.
+        # * non-financial endpoints (verify) are dispatched through a
+        #   READ_ONLY view — structurally incapable of money movement even if
+        #   a bug routed them at admit-transaction.
+        # * financial endpoints require an explicit caller grant
+        #   (``self.financial_grant``, set by the operator/HITL layer); with
+        #   no grant the request runs under a read-only context and the agent
+        #   refuses it BEFORE any gated code executes.
         base = self.agent.default_context
         scoped = base.narrowed(tenant=tenant)
         if not gated:

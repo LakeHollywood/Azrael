@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import random
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -136,7 +137,7 @@ class QuarantineManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("""
                 SELECT id, ledger_seq, mono_ns, utc_wall, stream, payload,
-                       signature, retry_count
+                       signature, prev_seal, retry_count
                 FROM quarantine_queue
                 WHERE status = 'PENDING' AND next_retry <= ?
                 ORDER BY ledger_seq ASC
@@ -310,7 +311,21 @@ class AnchorDaemon:
 
     # ---------- network awareness ----------
     def is_network_available(self):
-        """Quick check for tactical mesh / upstream connectivity."""
+        """Quick check for tactical mesh / upstream connectivity.
+
+        STS_NETWORK_PROBE (env): override the default-route heuristic with an
+        explicit host:port TCP probe (e.g. 127.0.0.1:8099). Lets operators
+        validate store-and-forward recovery against a local stub endpoint
+        without fabricating a kernel default route.
+        """
+        probe = os.getenv("STS_NETWORK_PROBE", "").strip()
+        if probe:
+            try:
+                host, _, port = probe.partition(":")
+                with socket.create_connection((host, int(port or 443)), timeout=2):
+                    return True
+            except OSError:
+                return False
         try:
             result = subprocess.run(["ip", "route", "show", "default"],
                                     capture_output=True, text=True, timeout=2)

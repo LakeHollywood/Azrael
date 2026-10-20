@@ -1,0 +1,37 @@
+[Unit]
+Description=STS Assurance Ledger Anchor Daemon (DIL Sync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sts_user
+Group=sts_user
+
+# Environment Variables
+Environment="STS_QUEUE_DB=/var/lib/sts/anchor_queue.db"
+Environment="STS_CORE_URL=https://core-command.local/api/v1/anchors/bulk"
+Environment="STS_DEVICE_ID=orin-splinter-01"
+Environment="STS_CHECK_INTERVAL=30"
+
+# Execution
+ExecStart=/usr/bin/python3 -m bench.anchor_daemon
+Restart=always
+RestartSec=10
+
+# --- AGENT/TASK SEPARATION (Resource Capping) ---
+# Guarantee the daemon survives stress-ng hooks
+CPUQuota=30%
+MemoryMax=256M
+MemoryHigh=200M
+IPAccounting=yes
+
+# Security Hardening
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/sts /var/log/sts /etc/sts
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,226 @@
+{
+  "baseline": {
+    "tc1": {
+      "category": "1. Temporal Isolation & Drift",
+      "passed": true,
+      "wall_time_s": 3.01,
+      "metrics": {
+        "poison_events_injected": 0,
+        "poison_events_rejected_by_sts": 0,
+        "worst_step_magnitude_s": 0.0,
+        "clock_drift_delta_ppm_peak": 81894.881,
+        "wall_clock_frequency_drift_ppm_step_excluded": 0.0,
+        "agent_divergence_mean_ppm": 496.168,
+        "sts_backward_steps_accepted": 0,
+        "ordering_violations": 0,
+        "agent_state_samples": 8270,
+        "error_handling_latency_ms_max": 0.0,
+        "clock_stats": {
+          "samples": 8270,
+          "rejected_backward_steps": 0,
+          "max_step_ns": 1772191,
+          "min_step_ns": 6190,
+          "mean_step_ns": 363484.967
+        }
+      },
+      "failures": []
+    },
+    "tc2": {
+      "category": "2. High-Frequency Jitter",
+      "passed": true,
+      "wall_time_s": 4.09,
+      "metrics": {
+        "loader_threads": 2,
+        "agent_threads": 3,
+        "ledger_rows": 86,
+        "backward_time_jumps": 0,
+        "seal_chain_ok": true,
+        "jitter_under_load": {
+          "samples": 83,
+          "mean_interval_us": 142099.169,
+          "stddev_us": 66511.183,
+          "p99_deviation_us": 129460.302,
+          "backward_intervals": 0
+        },
+        "clock_stats": {
+          "samples": 172,
+          "rejected_backward_steps": 0,
+          "max_step_ns": 122744657,
+          "min_step_ns": 17764,
+          "mean_step_ns": 23760295.316
+        }
+      },
+      "failures": []
+    },
+    "tc3": {
+      "category": "3. Ledger Throughput & SEAL Integrity",
+      "passed": true,
+      "wall_time_s": 1.03,
+      "metrics": {
+        "rows_committed": 6500,
+        "sustained_tps": 6669.4,
+        "burst_tps": 16781.2,
+        "burst_ratio_vs_sustained": 2.516,
+        "sqlite_write_latency_ms": {
+          "p50": 0.0193,
+          "p99": 0.0991,
+          "max": 0.4541
+        },
+        "seal_verification_ok": true,
+        "seal_verification_failures": 0,
+        "verification_overhead_ms": 79.44,
+        "hashes_per_second": 81824.3,
+        "ordering_violations": 0,
+        "payload_corruptions": 0
+      },
+      "failures": []
+    },
+    "tc4": {
+      "category": "4. Adversarial Network Attacks",
+      "passed": true,
+      "wall_time_s": 7.57,
+      "metrics": {
+        "cycles_attempted": 60,
+        "cycles_delivered": 11,
+        "cycles_degraded_locally_buffered": 49,
+        "heartbeat_survival_ratio": 2.52,
+        "watchdog_max_gap_s": 0.0503,
+        "watchdog_budget_s": 10.0,
+        "transport_stats": {
+          "sent": 60,
+          "dropped": 9,
+          "partitioned": 40,
+          "spiked": 5,
+          "delivered": 11
+        },
+        "buffer_retained_rows": 49,
+        "buffer_recovered_rows": 49,
+        "buffer_left_unsynced": 0,
+        "ledger_rows_total": 60,
+        "seal_chain_ok_after_recovery": true,
+        "ordering_violations": 0
+      },
+      "failures": []
+    }
+  },
+  "stress": {
+    "tc1": {
+      "category": "1. Temporal Isolation & Drift",
+      "passed": true,
+      "wall_time_s": 3.01,
+      "metrics": {
+        "poison_events_injected": 5,
+        "poison_events_rejected_by_sts": 5,
+        "worst_step_magnitude_s": 7200.0,
+        "clock_drift_delta_ppm_peak": 1156468.41,
+        "wall_clock_frequency_drift_ppm_step_excluded": 0.0,
+        "agent_divergence_mean_ppm": 1350.406,
+        "sts_backward_steps_accepted": 0,
+        "ordering_violations": 0,
+        "agent_state_samples": 8263,
+        "error_handling_latency_ms_max": 0.251,
+        "clock_stats": {
+          "samples": 8263,
+          "rejected_backward_steps": 0,
+          "max_step_ns": 1220233,
+          "min_step_ns": 6297,
+          "mean_step_ns": 363688.904
+        }
+      },
+      "failures": []
+    },
+    "tc2": {
+      "category": "2. High-Frequency Jitter",
+      "passed": true,
+      "wall_time_s": 4.13,
+      "metrics": {
+        "loader_threads": 4,
+        "agent_threads": 3,
+        "ledger_rows": 125,
+        "backward_time_jumps": 0,
+        "seal_chain_ok": true,
+        "jitter_under_load": {
+          "samples": 36,
+          "mean_interval_us": 328896.529,
+          "stddev_us": 145081.392,
+          "p99_deviation_us": 325610.891,
+          "backward_intervals": 0
+        },
+        "clock_stats": {
+          "samples": 78,
+          "rejected_backward_steps": 0,
+          "max_step_ns": 292324900,
+          "min_step_ns": 88029,
+          "mean_step_ns": 52831281.026
+        }
+      },
+      "failures": []
+    },
+    "tc3": {
+      "category": "3. Ledger Throughput & SEAL Integrity",
+      "passed": true,
+      "wall_time_s": 0.99,
+      "metrics": {
+        "rows_committed": 6500,
+        "sustained_tps": 7655.1,
+        "burst_tps": 16436.6,
+        "burst_ratio_vs_sustained": 2.147,
+        "sqlite_write_latency_ms": {
+          "p50": 0.018,
+          "p99": 0.0716,
+          "max": 0.6936
+        },
+        "seal_verification_ok": true,
+        "seal_verification_failures": 0,
+        "verification_overhead_ms": 160.76,
+        "hashes_per_second": 40432.7,
+        "ordering_violations": 0,
+        "payload_corruptions": 0
+      },
+      "failures": []
+    },
+    "tc4": {
+      "category": "4. Adversarial Network Attacks",
+      "passed": true,
+      "wall_time_s": 7.57,
+      "metrics": {
+        "cycles_attempted": 60,
+        "cycles_delivered": 11,
+        "cycles_degraded_locally_buffered": 49,
+        "heartbeat_survival_ratio": 2.52,
+        "watchdog_max_gap_s": 0.0504,
+        "watchdog_budget_s": 10.0,
+        "transport_stats": {
+          "sent": 60,
+          "dropped": 9,
+          "partitioned": 40,
+          "spiked": 5,
+          "delivered": 11
+        },
+        "buffer_retained_rows": 49,
+        "buffer_recovered_rows": 49,
+        "buffer_left_unsynced": 0,
+        "ledger_rows_total": 60,
+        "seal_chain_ok_after_recovery": true,
+        "ordering_violations": 0
+      },
+      "failures": []
+    }
+  },
+  "verification": {
+    "ok": true,
+    "ledgers_audited": 3,
+    "total_rows": 13245,
+    "temporal_anomalies_total": 0,
+    "seal_failures_total": 0,
+    "audit_jsonl_chain": null,
+    "tamper_control": {
+      "ran": true,
+      "source": "tc3_ledger.db",
+      "tamper_detected": true,
+      "sample_error": "seq 6001: seal mismatch \u2014 payload/time edited"
+    }
+  },
+  "overall_pass": true,
+  "generated": 1792450545.2190223
+}

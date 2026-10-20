@@ -47,6 +47,7 @@ not whatever the gate looked like when the job was enqueued.
 from __future__ import annotations
 
 import time as _time_module
+import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional
@@ -65,16 +66,27 @@ __all__ = [
     "enqueue",
     "drain_ready",
     "authorize",
+    "verify",
     "register_tool",
     "register_lifecycle_action",
     "set_decision_ttl",
     "register_senior_approver",
     "register_qualified_approver",
+    "remove_senior_approver",
+    "remove_qualified_approver",
+    "remove_role",
+    "roles_for",
+    "grant_role",
     "approve",
     "revoke_approval",
     "revoke_tool",
     "revoke_resource",
     "register_policy",
+    "EXECUTION_SURFACES",
+    "ACTION_ALIASES",
+    "canonical_action",
+    "AUDIT_REQUIRED_FIELDS",
+    "audit_fields",
 ]
 
 
@@ -84,6 +96,122 @@ class AuthorizationError(Exception):
     def __init__(self, message: str = "authorization denied", *, decision=None):
         super().__init__(message)
         self.decision = decision
+
+
+# ---------------------------------------------------------------------------
+# PD-005: governed execution surfaces.  Every operation capable of an
+# external side effect, state transition, or protected-resource consumption
+# must converge on authorize() immediately prior to execution.  The gate
+# test asserts each surface here produces an authorize() observation --
+# "no ungoverned execution path exists".
+# ---------------------------------------------------------------------------
+EXECUTION_SURFACES = (
+    "tool.execute",
+    "workflow.resume",
+    "checkpoint.restore",
+    "job.execute",
+    "agent.spawn",
+    # CI-002 inventory names external API invocation as
+    # ``external_api.invoke``; ``api.invoke`` is retained as a legacy alias
+    # so previously integrated callers keep converging on the chokepoint.
+    "external_api.invoke",
+    "api.invoke",
+    "resource.allocate",
+    # Continuation of a workflow that terminated abnormally -- same
+    # authority class as resume (senior approval at execution time).
+    "workflow.continue",
+)
+
+#: action -> canonical governed surface.  Aliases resolve through the same
+#: profiles, rosters and audit machinery as their canonical surface.
+ACTION_ALIASES: Mapping[str, str] = {
+    "api.invoke": "external_api.invoke",
+}
+
+
+def canonical_action(action: str) -> str:
+    """Map an action to its canonical governed execution surface."""
+    return ACTION_ALIASES.get(action, action)
+
+# PD-006: audit-integrity fields required on every emitted record.
+AUDIT_REQUIRED_FIELDS = (
+    "decision_id",
+    "subject",
+    "action",
+    "resource",
+    "risk_score",
+    "approval_policy",
+    "decision",
+    "evaluated_at",
+    "ttl",
+)
+
+
+def audit_fields(decision: "AuthorizationDecision") -> dict:
+    """Project a decision onto the PD-006 audit schema.
+
+    Every field is derived from the decision itself (never from mutable
+    globals), so the projection is stable for replay/audit verification.
+    ``evaluated_at``/``ttl`` fall back to the record's ``created_at`` when
+    present, but the canonical values always come from the decision.
+    """
+    return {
+        "decision_id": decision.decision_id,
+        "subject": decision.subject,
+        "action": decision.action,
+        "resource": decision.resource,
+        "risk_score": decision.risk_score,
+        "approval_policy": decision.policy.value,
+        "decision": "ALLOW" if decision.allow else "DENY",
+        "evaluated_at": decision.evaluated_at,
+        "ttl": decision.ttl_seconds,
+    }
+
+
+def _audit_record(
+    *,
+    subject: str,
+    action: str,
+    resource: str,
+    score: float,
+    policy: ApprovalPolicy,
+    allow: bool,
+    now: float,
+    ttl: float,
+    decision_id: str,
+    parameters: Optional[Mapping[str, Any]] = None,
+) -> dict:
+    """Build the full PD-006 audit record for one evaluation.
+
+    The gate's :func:`create_approval_record` supplies the constitutional
+    score/policy pairing (record policy can never be laxer than its score);
+    this wrapper adds the remaining required fields -- decision outcome,
+    request identity, freshness window, and the unique decision token --
+    so *every* decision (ALLOW, DENY, or fail-closed error path) emits a
+    complete, JSON-serializable audit entry.
+    """
+    base = create_approval_record(
+        score,
+        operation=f"{action}:{resource}",
+        actor=str(subject),
+        clock=_record_clock_from_epoch(now),
+        id_factory=lambda: decision_id,
+        extra={"parameters_keys": sorted(parameters or {}),
+               "subject": str(subject)},
+    )
+    base.update(audit_fields(AuthorizationDecision(
+        allow=allow, policy=policy, risk_score=score, reason="",
+        record=base, evaluated_at=now, ttl_seconds=ttl,
+        subject=str(subject), action=str(action), resource=str(resource),
+        decision_id=decision_id)))
+    return base
+
+
+def _record_clock_from_epoch(epoch: float):
+    """Adapt an already-resolved epoch timestamp for the record builder."""
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    return type("_FixedClock", (),
+                {"utcnow": staticmethod(lambda: dt.replace(tzinfo=None))})()
 
 
 @dataclass(frozen=True)
@@ -100,18 +228,80 @@ class AuthorizationDecision:
     # decision older than ``ttl_seconds`` as stale and re-authorize.
     evaluated_at: float = 0.0
     ttl_seconds: float = 0.0
+    # Request identity, echoed into the audit projection (PD-006).
+    subject: str = ""
+    action: str = ""
+    resource: str = ""
+    # Unique token for this evaluation (PD-007: replay resistance).
+    decision_id: str = ""
 
     def __bool__(self) -> bool:  # convenience: `if decision:` mirrors allow
         return self.allow
 
     @property
     def fresh(self) -> bool:
-        """True while the decision is still within its validity TTL."""
+        """True while the decision is still within its validity TTL.
+
+        A DENY is never "fresh" (there is nothing to carry forward), and an
+        ALLOW whose TTL has elapsed reports False -- callers must then
+        re-authorize rather than execute on the stale token (PD-007).
+        """
         if not self.allow:
             return False
         if self.ttl_seconds <= 0:
             return True
         return (_now_epoch() - self.evaluated_at) <= self.ttl_seconds
+
+    def verify(
+        self,
+        *,
+        approvers: Optional[list[str]] = None,
+        break_glass: bool = False,
+        clock: Any = None,
+        id_factory: Any = None,
+        parameters: Optional[Mapping[str, Any]] = None,
+    ) -> "AuthorizationDecision":
+        """Re-run the full authorization at execution time (PD-007).
+
+        Callers use this *immediately prior* to executing work that was
+        planned against an earlier decision::
+
+            decision = authorize(...)
+            ...                       # queue delay / planning continues
+            if decision.verify(...).fresh:
+                execute(job)          # only a live re-evaluation counts
+
+        A replayed token cannot succeed: verification always re-evaluates
+        live revocation, roster, ledger, and TTL state.  Once the original
+        TTL has elapsed the re-check fails closed even when every approval
+        still stands, because the caller must supply a *fresh* authorize()
+        call -- not this receipt.  Returns the re-evaluated decision.
+        """
+        if not self.allow:
+            return self
+        now = _to_epoch(clock) if clock is not None else _now_epoch()
+        if now is None:
+            return _deny(self.risk_score, self.policy,
+                         "invalid clock supplied: fail closed",
+                         subject=self.subject, action=self.action,
+                         resource=self.resource,
+                         decision_id=self.decision_id)
+        if self.ttl_seconds > 0 and (now - self.evaluated_at) > self.ttl_seconds:
+            return _deny(
+                self.risk_score, self.policy,
+                "replayed decision outside freshness window: re-authorize",
+                now=now, subject=self.subject, action=self.action,
+                resource=self.resource, decision_id=self.decision_id)
+        return authorize(
+            subject=self.subject,
+            action=self.action,
+            resource=self.resource,
+            parameters=parameters,
+            approvers=approvers,
+            break_glass=break_glass,
+            clock=clock,
+            id_factory=id_factory,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +363,45 @@ _LIFECYCLE_PROFILES: dict[str, dict[str, Any]] = {
         "affects_authz": False,
         "modifies_approval_gate": False,
     },
+    # Continuation of an abnormally-terminated workflow carries the same
+    # authority class as resume: senior approval, evaluated at execution
+    # time (CI-002 surface inventory).
+    "workflow.continue": {
+        "risk_score": 45.0,           # SENIOR_APPROVAL band
+        "affects_authz": False,
+        "modifies_approval_gate": False,
+    },
     "checkpoint.restore": {
         # EB-002 policy: risk_score 60 -> DUAL_APPROVAL band.  Stated
         # explicitly so the YAML policy and the code cannot drift apart.
         "risk_score": 60.0,           # DUAL_APPROVAL (two distinct qualified approvers)
         "affects_authz": True,        # -> >= AUTHZ_RISK_FLOOR (60), never relaxable
+        "modifies_approval_gate": False,
+    },
+    # PD-005 execution surfaces beyond tools/workflows/checkpoints.  Queued
+    # jobs execute hours after enqueue, so they require a fresh senior
+    # approval at execution time; agent spawning and resource allocation
+    # are single-approval operations; external API invocation defaults to
+    # single approval unless the endpoint is registered as a higher-risk
+    # tool (``api.invoke`` is a legacy alias resolving here).
+    "job.execute": {
+        "risk_score": 45.0,           # SENIOR_APPROVAL band
+        "affects_authz": False,
+        "modifies_approval_gate": False,
+    },
+    "agent.spawn": {
+        "risk_score": 30.0,           # SINGLE_APPROVAL band
+        "affects_authz": False,
+        "modifies_approval_gate": False,
+    },
+    "external_api.invoke": {
+        "risk_score": 30.0,           # SINGLE_APPROVAL band
+        "affects_authz": False,
+        "modifies_approval_gate": False,
+    },
+    "resource.allocate": {
+        "risk_score": 30.0,           # SINGLE_APPROVAL band
+        "affects_authz": False,
         "modifies_approval_gate": False,
     },
 }
@@ -202,6 +426,151 @@ _QUALIFIED_APPROVERS: set[str] = set()
 def register_qualified_approver(name: str) -> None:
     """Add ``name`` to the qualified-approver registry for dual approval."""
     _QUALIFIED_APPROVERS.add(str(name))
+
+
+def remove_senior_approver(name: str) -> bool:
+    """Strip ``name`` from the senior roster.
+
+    PD-004 (revocation freshness): roster removal takes effect before
+    execution -- the very next authorize() call re-reads live roster state,
+    so a previously issued ALLOW cannot carry a removed approver across the
+    boundary.  Returns True when the entry existed and was removed.
+    """
+    name = str(name)
+    if name in _SENIOR_ROSTER:
+        _SENIOR_ROSTER.discard(name)
+        return True
+    return False
+
+
+def remove_qualified_approver(name: str) -> bool:
+    """Strip ``name`` from the qualified-approver registry (PD-004)."""
+    name = str(name)
+    if name in _QUALIFIED_APPROVERS:
+        _QUALIFIED_APPROVERS.discard(name)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Roles: subject/action grants evaluated *live* at authorization time.
+# A role is an allow-list mapping (holder, action) -> True; removal of a
+# role (or any membership in it) must precede execution to matter, which is
+# exactly what PD-004 verifies: no role snapshot is ever embedded into a
+# decision or receipt.
+# ---------------------------------------------------------------------------
+_ROLE_GRANTS: dict[tuple[str, str], bool] = {}
+
+
+def grant_role(holder: str, action: str) -> None:
+    """Grant ``holder`` standing authority to perform ``action``.
+
+    Aliased actions are stored under their canonical surface so a grant
+    made through either spelling (e.g. legacy ``api.invoke``) governs the
+    same chokepoint lookup.
+    """
+    _ROLE_GRANTS[(str(holder), canonical_action(str(action)))] = True
+
+
+def remove_role(holder: str, action: str) -> bool:
+    """Revoke a role grant; subsequent authorizations DENY without it.
+
+    Returns True when the grant existed and was removed.
+    """
+    key = (str(holder), canonical_action(str(action)))
+    existed = key in _ROLE_GRANTS
+    _ROLE_GRANTS.pop(key, None)
+    return existed
+
+
+def roles_for(subject: str, action: str) -> bool:
+    """True when ``subject`` currently holds a role grant for ``action``."""
+    return bool(_ROLE_GRANTS.get((str(subject), canonical_action(str(action)))))
+
+
+# ---------------------------------------------------------------------------
+# Infrastructure backends (PD-003: fail-closed verification).
+#
+# SAIL reads its governing state through these indirections rather than
+# touching module globals directly, so deployments can point each backend
+# at a real service (approval ledger DB, policy store, tool registry,
+# roster directory) -- and tests can simulate outages by making a backend
+# raise.  The constitutional rule: **infrastructure failure SHALL NOT
+# create authority.**  Any exception raised while consulting a backend is
+# converted into a DENY inside authorize(); it never propagates as an
+# implicit allow and never short-circuits the remaining checks with stale
+# data.
+# ---------------------------------------------------------------------------
+
+class BackendUnavailable(RuntimeError):
+    """Raised by an infrastructure backend that cannot answer a lookup."""
+
+
+def _tool_lookup(resource: str) -> Optional[Mapping[str, Any]]:
+    return _TOOL_REGISTRY.get(resource)
+
+
+def _ledger_lookup(key: tuple[str, str, str]) -> list[str]:
+    return sorted(_APPROVAL_LEDGER.get(key, ()))
+
+
+def _roster_lookup(kind: str) -> set[str]:
+    if kind == "senior":
+        return set(_SENIOR_ROSTER)
+    if kind == "qualified":
+        return set(_QUALIFIED_APPROVERS)
+    raise KeyError(f"unknown roster {kind!r}")
+
+
+def _policy_lookup(action: str) -> Optional[Mapping[str, Any]]:
+    # Policy store: lifecycle profiles + registered overrides live here.
+    # Aliased actions (e.g. legacy ``api.invoke`` -> canonical
+    # ``external_api.invoke``) resolve through the canonical surface so a
+    # single profile governs both spellings.
+    return _LIFECYCLE_PROFILES.get(canonical_action(action))
+
+
+_TOOL_BACKEND: Callable[[str], Optional[Mapping[str, Any]]] = _tool_lookup
+_LEDGER_BACKEND: Callable[[tuple], list[str]] = _ledger_lookup
+_ROSTER_BACKEND: Callable[[str], set[str]] = _roster_lookup
+_POLICY_BACKEND: Callable[[str], Optional[Mapping[str, Any]]] = _policy_lookup
+_REVOCATION_BACKEND: Callable[[str, str], bool] = (
+    lambda resource, subject: (
+        str(resource) in _REVOKED_TOOLS or str(resource) in _REVOKED_RESOURCES)
+)
+_AUTHZ_BACKEND: Callable[[str, str], bool] = roles_for
+
+
+def configure_backend(
+    *,
+    tool_registry: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
+    approval_ledger: Optional[Callable[[tuple], list[str]]] = None,
+    roster: Optional[Callable[[str], set[str]]] = None,
+    policy_store: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
+    revocation: Optional[Callable[[str, str], bool]] = None,
+    authz: Optional[Callable[[str, str], bool]] = None,
+) -> None:
+    """Point SAIL's governance lookups at deployment-provided backends.
+
+    Each callable mirrors the in-process default (lookup in, answer out);
+    raising any exception simulates that subsystem being unavailable and
+    forces authorize() to fail closed (PD-003).  Pass ``None`` to leave a
+    backend unchanged; reload the module to restore all defaults.
+    """
+    global _TOOL_BACKEND, _LEDGER_BACKEND, _ROSTER_BACKEND
+    global _POLICY_BACKEND, _REVOCATION_BACKEND, _AUTHZ_BACKEND
+    if tool_registry is not None:
+        _TOOL_BACKEND = tool_registry
+    if approval_ledger is not None:
+        _LEDGER_BACKEND = approval_ledger
+    if roster is not None:
+        _ROSTER_BACKEND = roster
+    if policy_store is not None:
+        _POLICY_BACKEND = policy_store
+    if revocation is not None:
+        _REVOCATION_BACKEND = revocation
+    if authz is not None:
+        _AUTHZ_BACKEND = authz
 
 
 def revoke_approval(
@@ -476,11 +845,12 @@ def authorize(
     ``decision.allow`` and never execute the action otherwise.
 
     Execution-boundary invariant: every governed operation (tool
-    invocation, workflow resume, checkpoint restore, queued-job execution)
-    converges on this single chokepoint *immediately prior* to execution.
-    Planning-time / scheduling-time / creation-time approvals never count;
-    a decision is only valid if it was produced here, at this instant,
-    against live revocation state.
+    invocation, workflow resume, checkpoint restore, queued-job execution,
+    agent spawn, api invoke, resource allocation) converges on this single
+    chokepoint *immediately prior* to execution.  Planning-time /
+    scheduling-time / creation-time approvals never count; a decision is
+    only valid if it was produced here, at this instant, against live
+    revocation state.
 
     Denial rules (all fail-closed):
       * Missing/blank subject, action, or resource -> DENY.
@@ -497,6 +867,12 @@ def authorize(
       * SINGLE_APPROVAL band -> requires one approver.
       * AUTONOMOUS band -> allowed without human sign-off (EB-003:
         registered low-risk tools keep their autonomous path).
+      * The subject must currently hold a role grant for ``action``
+        (grant_role); role removal before execution flips the next call
+        to DENY (PD-004).
+      * ANY governance backend raising (authorization service, approval
+        ledger, policy store, tool registry, roster lookup) converts to a
+        DENY -- infrastructure failure SHALL NOT create authority (PD-003).
 
     Approvals considered are the union of the per-call ``approvers`` list
     and standing grants in the approval ledger for this exact
@@ -509,52 +885,126 @@ def authorize(
     work runs.  ``clock`` (epoch seconds or datetime) overrides "now" for
     deterministic tests.
     """
-    now = _to_epoch(clock) if clock is not None else _now_epoch()
+    # PD-006: mint exactly one unique decision id per evaluation; PD-007:
+    # record ids share the token so replayed receipts are traceable and
+    # distinguishable.  An injected ``id_factory`` (deterministic tests)
+    # supplies the token instead.
+    decision_id = (id_factory() if id_factory is not None
+                   else f"dec-{_uuid.uuid4()}")
+    return _authorize_inner(
+        subject=subject, action=action, resource=resource,
+        parameters=parameters, approvers=approvers, break_glass=break_glass,
+        clock=clock, decision_id=decision_id)
+
+
+def _authorize_inner(
+    *,
+    subject: str,
+    action: str,
+    resource: str,
+    parameters: Optional[Mapping[str, Any]],
+    approvers: Optional[list[str]],
+    break_glass: bool,
+    clock: Any,
+    decision_id: str,
+) -> AuthorizationDecision:
+    """Core evaluation; every governance lookup is wrapped fail-closed.
+
+    PD-006: every return path below carries a complete audit record --
+    including the early fail-closed denials -- because each decision must
+    be independently reconstructable from its record alone.
+    """
+
+    def deny(policy: ApprovalPolicy, score: float, reason: str,
+             now: Optional[float] = None) -> AuthorizationDecision:
+        stamp = now if now is not None else _now_epoch()
+        return _deny(score, policy, reason, now=stamp, subject=subject,
+                     action=action, resource=resource,
+                     decision_id=decision_id,
+                     record=_audit_record(
+                         subject=subject, action=action, resource=resource,
+                         score=score, policy=policy, allow=False,
+                         now=stamp, ttl=0.0, decision_id=decision_id,
+                         parameters=parameters))
+
+    try:
+        now = _to_epoch(clock) if clock is not None else _now_epoch()
+    except Exception:
+        now = None
     if now is None:
-        return _deny(0.0, ApprovalPolicy.RESTRICTED,
-                     "invalid clock supplied: fail closed")
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "invalid clock supplied: fail closed")
 
     if not subject or not action or not resource:
-        return _deny(0.0, ApprovalPolicy.RESTRICTED,
-                     "missing subject/action/resource: fail closed", now=now)
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "missing subject/action/resource: fail closed", now=now)
 
     # Revocation is checked before anything else: a revoked tool or
     # resource denies even when a valid profile and prior ALLOW exist.
-    if str(resource) in _REVOKED_TOOLS:
-        return _deny(0.0, ApprovalPolicy.RESTRICTED,
-                     f"tool {resource!r} has been revoked: fail closed",
-                     now=now)
-    if str(resource) in _REVOKED_RESOURCES:
-        return _deny(0.0, ApprovalPolicy.RESTRICTED,
-                     f"resource {resource!r} authorization revoked: "
-                     "fail closed", now=now)
+    # A revocation-backend failure also denies -- inability to confirm
+    # revocation status never implies "not revoked".
+    try:
+        revoked = bool(_REVOCATION_BACKEND(str(resource), str(subject)))
+    except Exception:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "revocation backend unavailable: fail closed", now=now)
+    if revoked:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    f"tool/resource {resource!r} authorization revoked: "
+                    "fail closed", now=now)
 
-    profile = _TOOL_REGISTRY.get(resource)
+    # Subject must currently hold the role governing this action; roles are
+    # read live so role removal takes effect before execution (PD-004).
+    try:
+        authorized_subject = bool(_AUTHZ_BACKEND(str(subject), str(action)))
+    except Exception:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "authorization service unavailable: fail closed", now=now)
+    if not authorized_subject:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    f"subject {subject!r} holds no role for {action!r}: "
+                    "fail closed", now=now)
+
+    # Tool registry lookup (unregistered resources fall back to the
+    # action-level lifecycle profile, then the max-risk default).
+    try:
+        profile = _TOOL_BACKEND(str(resource))
+    except Exception:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "tool registry unavailable: fail closed", now=now)
     if profile is None:
-        # Resource is an instance id (workflow.id, checkpoint.id, job
-        # resource, ...); fall back to the action-level lifecycle profile
-        # before the max-risk default so governed transitions score
-        # deterministically.
-        profile = _LIFECYCLE_PROFILES.get(action, _DEFAULT_TOOL_PROFILE)
-    score = _score_operation(profile, action)
-    policy = determine_policy(score)
-    ttl = float(profile.get("ttl_seconds", _DECISION_TTL))
+        try:
+            profile = _POLICY_BACKEND(str(action))
+        except Exception:
+            return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                        "policy store unavailable: fail closed", now=now)
+        if profile is None:
+            profile = _DEFAULT_TOOL_PROFILE
 
-    record = create_approval_record(
-        score,
-        operation=f"{action}:{resource}",
-        actor=str(subject),
-        clock=_record_clock(clock) if clock is not None else None,
-        id_factory=id_factory,
-        extra={"parameters_keys": sorted(parameters or {}), "subject": str(subject)},
-    )
+    try:
+        score = _score_operation(profile, action)
+        policy = determine_policy(score)
+        ttl = float(profile.get("ttl_seconds", _DECISION_TTL))
+    except Exception:
+        return deny(ApprovalPolicy.RESTRICTED, 0.0,
+                    "risk scoring failed: fail closed", now=now)
+
+    record = _audit_record(
+        subject=subject, action=action, resource=resource,
+        score=score, policy=policy, allow=False, now=now, ttl=ttl,
+        decision_id=decision_id, parameters=parameters)
 
     granted = {str(a) for a in approvers or []}
     # Standing approvals recorded via approve() for this exact grant are
     # live state; they participate in every subsequent evaluation until
     # revoked (revoke_approval) -- never snapshotted into a receipt.
-    granted |= set(_APPROVAL_LEDGER.get(
-        (str(subject), str(action), str(resource)), ()))
+    try:
+        granted |= set(_LEDGER_BACKEND(
+            (str(subject), str(action), str(resource))))
+    except Exception:
+        return deny(policy, score,
+                    "approval ledger unavailable: fail closed", now=now)
+
     needs = {
         ApprovalPolicy.AUTONOMOUS: 0,
         ApprovalPolicy.SINGLE_APPROVAL: 1,
@@ -567,17 +1017,23 @@ def authorize(
     # *independent* humans (or senior operators) distinct from the actor.
     granted.discard(str(subject))
 
-    def _decide(allow: bool, reason: str) -> AuthorizationDecision:
+    def decide(allow: bool, reason: str) -> AuthorizationDecision:
+        # PD-006: stamp the final outcome into the record so the emitted
+        # audit entry always matches the decision it documents.
+        record["decision"] = "ALLOW" if allow else "DENY"
         return AuthorizationDecision(allow, policy, score, reason, record,
-                                     evaluated_at=now, ttl_seconds=ttl)
+                                     evaluated_at=now, ttl_seconds=ttl,
+                                     subject=str(subject), action=str(action),
+                                     resource=str(resource),
+                                     decision_id=decision_id)
 
     if needs is None:
         if break_glass and len(granted) >= 2:
-            return _decide(True, "break-glass override")
-        return _decide(False, f"policy {policy} denies by default")
+            return decide(True, "break-glass override")
+        return decide(False, f"policy {policy} denies by default")
 
     if len(granted) < needs:
-        return _decide(
+        return decide(
             False,
             f"policy {policy} requires {needs} approver(s), got {len(granted)}")
 
@@ -585,10 +1041,14 @@ def authorize(
         # EB-001: the approver must come from the registered senior
         # roster; anything not on it fails closed.  An empty roster means
         # no senior operators are known, so every SENIOR_APPROVAL request
-        # is denied.
-        seniors = granted & _SENIOR_ROSTER
+        # is denied -- and an unreachable roster likewise.
+        try:
+            seniors = granted & _ROSTER_BACKEND("senior")
+        except Exception:
+            return decide(
+                False, "senior approver roster unavailable or unsatisfied")
         if not seniors:
-            return _decide(
+            return decide(
                 False, "senior approver roster unavailable or unsatisfied")
 
     if policy is ApprovalPolicy.DUAL_APPROVAL:
@@ -598,14 +1058,18 @@ def authorize(
         # bar.  The qualification registry is required for DUAL_APPROVAL:
         # with no registered qualified approvers, every request fails
         # closed rather than trusting unknown identities.
-        qualified = granted & _QUALIFIED_APPROVERS
+        try:
+            qualified = granted & _ROSTER_BACKEND("qualified")
+        except Exception:
+            return decide(
+                False, "qualified approver roster unavailable: fail closed")
         if len(qualified) < needs:
-            return _decide(
+            return decide(
                 False,
                 f"dual approval requires {needs} distinct qualified "
                 f"approvers, got {len(qualified)}")
 
-    return _decide(True, "approved")
+    return decide(True, "approved")
 
 
 def _deny(
@@ -614,8 +1078,17 @@ def _deny(
     reason: str,
     *,
     now: Optional[float] = None,
+    subject: str = "",
+    action: str = "",
+    resource: str = "",
+    decision_id: str = "",
+    record: Optional[Mapping[str, object]] = None,
 ) -> AuthorizationDecision:
-    return AuthorizationDecision(False, policy, score, reason, {},
+    return AuthorizationDecision(False, policy, score, reason,
+                                 record if record is not None else {},
                                  evaluated_at=(now if now is not None
                                                else _now_epoch()),
-                                 ttl_seconds=0.0)
+                                 ttl_seconds=0.0,
+                                 subject=subject, action=action,
+                                 resource=resource,
+                                 decision_id=decision_id)

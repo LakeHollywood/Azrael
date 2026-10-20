@@ -21,12 +21,23 @@ def _fresh_sail():
     importlib.reload(mod)
 
 
+def _grant(sail, subject, action):
+    """Give ``subject`` the role governing ``action`` (PD-004/EB surfaces).
+
+    SAIL requires every subject to hold a live role grant for the action
+    being attempted -- planning-time or historical roles never count.
+    Existing EB tests use this helper to express exactly that precondition.
+    """
+    sail.grant_role(subject, action)
+
+
 # ---------------------------------------------------------------------------
 # EB-001: Workflow Resume Authorization
 # ---------------------------------------------------------------------------
 
 class TestEB001WorkflowResume:
     def _resume(self, sail, approvers=None):
+        _grant(sail, "wf-owner", "workflow.resume")
         return sail.authorize(
             subject="wf-owner",
             action="workflow.resume",
@@ -67,6 +78,7 @@ class TestEB001WorkflowResume:
 
     def test_stale_decision_is_not_fresh(self, sail_mod):
         sail_mod.set_decision_ttl(60)
+        _grant(sail_mod, "s", "workflow.resume")
         d = sail_mod.authorize(subject="s", action="workflow.resume",
                                resource="w", clock=1_000.0)
         assert d.evaluated_at == 1_000.0
@@ -79,6 +91,7 @@ class TestEB001WorkflowResume:
 
 class TestEB002CheckpointRestore:
     def _restore(self, sail, approvers):
+        _grant(sail, "requestor", "checkpoint.restore")
         return sail.authorize(
             subject="requestor",
             action="checkpoint.restore",
@@ -134,6 +147,7 @@ class TestEB002CheckpointRestore:
 
 class TestEB003ToolInvocation:
     def _tool(self, sail, name, approvers=None):
+        _grant(sail, "agent-1", "tool.execute")
         return sail.authorize(subject="agent-1", action="tool.execute",
                               resource=name, parameters={},
                               approvers=approvers)
@@ -189,6 +203,7 @@ class TestExecutionBoundaryChokepoint:
         # evaluate live state, not creation-time context.
         job = sail_mod.Job(owner="o", action="tool.execute",
                            resource="write_db")
+        _grant(sail_mod, "o", "tool.execute")
         sail_mod.register_tool("write_db", risk_score=30)
         sail_mod.enqueue(job)
         results = sail_mod.drain_ready(lambda j: pytest.fail(

@@ -69,6 +69,11 @@ __all__ = [
     "register_lifecycle_action",
     "set_decision_ttl",
     "register_senior_approver",
+    "register_qualified_approver",
+    "approve",
+    "revoke_approval",
+    "revoke_tool",
+    "revoke_resource",
     "register_policy",
 ]
 
@@ -122,6 +127,39 @@ _DEFAULT_TOOL_PROFILE = {
 
 _TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 
+# Revoked tools / resources.  A revoked entry DENYs even when a valid
+# profile (or a previously issued decision) still exists -- revocation is
+# checked first in authorize(), so "revoke then re-authorize" always fails
+# closed regardless of what the cached decision said.
+_REVOKED_TOOLS: set[str] = set()
+_REVOKED_RESOURCES: set[str] = set()
+
+
+def revoke_tool(name: str) -> None:
+    """Retire a registered tool; subsequent authorizations must DENY."""
+    _REVOKED_TOOLS.add(str(name))
+
+
+def revoke_resource(resource_id: str) -> None:
+    """Revoke all standing approvals for one resource instance id."""
+    _REVOKED_RESOURCES.add(str(resource_id))
+
+
+# Live approval state keyed by (subject, action, resource).  authorize()
+# unions these standing grants with any per-call ``approvers`` argument,
+# and revoke_approval() removes them *before* execution so a stale ALLOW
+# decision can never carry a revoked approval across the boundary.
+_APPROVAL_LEDGER: dict[tuple[str, str, str], set[str]] = {}
+
+
+def approve(
+    *, subject: str, action: str, resource: str, approver: str
+) -> None:
+    """Record ``approver``'s standing approval for one exact grant."""
+    _APPROVAL_LEDGER.setdefault(
+        (str(subject), str(action), str(resource)), set()
+    ).add(str(approver))
+
 # Lifecycle-operation profiles keyed by action name.  These govern runtime
 # state transitions that are not tied to one specific tool/workflow id --
 # e.g. ``workflow.resume`` and ``checkpoint.restore`` -- so an authorize()
@@ -136,8 +174,10 @@ _LIFECYCLE_PROFILES: dict[str, dict[str, Any]] = {
         "modifies_approval_gate": False,
     },
     "checkpoint.restore": {
-        "risk_score": 55.0,           # escalated to >= 60 by the authz floor
-        "affects_authz": True,        # -> DUAL_APPROVAL
+        # EB-002 policy: risk_score 60 -> DUAL_APPROVAL band.  Stated
+        # explicitly so the YAML policy and the code cannot drift apart.
+        "risk_score": 60.0,           # DUAL_APPROVAL (two distinct qualified approvers)
+        "affects_authz": True,        # -> >= AUTHZ_RISK_FLOOR (60), never relaxable
         "modifies_approval_gate": False,
     },
 }
@@ -151,6 +191,35 @@ _ACTION_OVERRIDES: Mapping[str, tuple[float, float]] = {
 # Empty by default -> SENIOR_APPROVAL requests fail closed until the
 # deployment registers its seniors explicitly.
 _SENIOR_ROSTER: set[str] = set()
+
+# Registry of *qualified* approvers for DUAL_APPROVAL operations (e.g.
+# checkpoint restore).  Unlike the senior roster this governs which
+# identities count as independent, authorized approvers at all; anything
+# not listed here is treated as an unqualified signer and fails closed.
+_QUALIFIED_APPROVERS: set[str] = set()
+
+
+def register_qualified_approver(name: str) -> None:
+    """Add ``name`` to the qualified-approver registry for dual approval."""
+    _QUALIFIED_APPROVERS.add(str(name))
+
+
+def revoke_approval(
+    *, subject: str, action: str, resource: str, approver: str
+) -> bool:
+    """Withdraw ``approver``'s standing approval for one exact grant.
+
+    Approvals are live state, not receipts: EB-001 requires that an
+    approval revoked *before execution* causes the next authorize() call
+    to DENY, even if an earlier decision said ALLOW.  Returns True when a
+    matching grant existed and was removed.
+    """
+    key = (str(subject), str(action), str(resource))
+    grants = _APPROVAL_LEDGER.get(key)
+    if grants and str(approver) in grants:
+        grants.discard(str(approver))
+        return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Clock & decision freshness (queued jobs)
@@ -406,15 +475,33 @@ def authorize(
     Returns an :class:`AuthorizationDecision`; callers must branch on
     ``decision.allow`` and never execute the action otherwise.
 
+    Execution-boundary invariant: every governed operation (tool
+    invocation, workflow resume, checkpoint restore, queued-job execution)
+    converges on this single chokepoint *immediately prior* to execution.
+    Planning-time / scheduling-time / creation-time approvals never count;
+    a decision is only valid if it was produced here, at this instant,
+    against live revocation state.
+
     Denial rules (all fail-closed):
       * Missing/blank subject, action, or resource -> DENY.
+      * Revoked tool or revoked resource id -> DENY (checked first, so
+        revocation beats any previously issued ALLOW).
       * Unregistered tool -> treated as max-risk -> DENY (RESTRICTED).
       * RESTRICTED band (score >= 80) -> DENY unless ``break_glass`` AND two
         distinct senior approvers are supplied.
-      * DUAL_APPROVAL band -> requires two distinct approvers.
-      * SENIOR_APPROVAL band -> requires one senior approver.
+      * DUAL_APPROVAL band -> requires two *distinct qualified* approvers
+        (identical approvers collapse to one grant; unqualified signers do
+        not count -- EB-002).
+      * SENIOR_APPROVAL band -> requires one approver from the senior
+        roster (EB-001: non-rostered approvers DENY).
       * SINGLE_APPROVAL band -> requires one approver.
-      * AUTONOMOUS band -> allowed without human sign-off.
+      * AUTONOMOUS band -> allowed without human sign-off (EB-003:
+        registered low-risk tools keep their autonomous path).
+
+    Approvals considered are the union of the per-call ``approvers`` list
+    and standing grants in the approval ledger for this exact
+    (subject, action, resource) triple -- so revoke_approval() before
+    execution flips the very next authorize() call to DENY.
 
     Queued jobs: the decision is evaluated at *execution* time and stamped
     with ``evaluated_at``/``ttl_seconds``; a cached decision whose TTL has
@@ -430,6 +517,17 @@ def authorize(
     if not subject or not action or not resource:
         return _deny(0.0, ApprovalPolicy.RESTRICTED,
                      "missing subject/action/resource: fail closed", now=now)
+
+    # Revocation is checked before anything else: a revoked tool or
+    # resource denies even when a valid profile and prior ALLOW exist.
+    if str(resource) in _REVOKED_TOOLS:
+        return _deny(0.0, ApprovalPolicy.RESTRICTED,
+                     f"tool {resource!r} has been revoked: fail closed",
+                     now=now)
+    if str(resource) in _REVOKED_RESOURCES:
+        return _deny(0.0, ApprovalPolicy.RESTRICTED,
+                     f"resource {resource!r} authorization revoked: "
+                     "fail closed", now=now)
 
     profile = _TOOL_REGISTRY.get(resource)
     if profile is None:
@@ -452,6 +550,11 @@ def authorize(
     )
 
     granted = {str(a) for a in approvers or []}
+    # Standing approvals recorded via approve() for this exact grant are
+    # live state; they participate in every subsequent evaluation until
+    # revoked (revoke_approval) -- never snapshotted into a receipt.
+    granted |= set(_APPROVAL_LEDGER.get(
+        (str(subject), str(action), str(resource)), ()))
     needs = {
         ApprovalPolicy.AUTONOMOUS: 0,
         ApprovalPolicy.SINGLE_APPROVAL: 1,
@@ -479,13 +582,28 @@ def authorize(
             f"policy {policy} requires {needs} approver(s), got {len(granted)}")
 
     if policy is ApprovalPolicy.SENIOR_APPROVAL:
-        # Senior approvals come from the registered senior roster; anything
-        # not on it fails closed.  An empty roster means no senior operators
-        # are known, so every SENIOR_APPROVAL request is denied.
+        # EB-001: the approver must come from the registered senior
+        # roster; anything not on it fails closed.  An empty roster means
+        # no senior operators are known, so every SENIOR_APPROVAL request
+        # is denied.
         seniors = granted & _SENIOR_ROSTER
         if not seniors:
             return _decide(
                 False, "senior approver roster unavailable or unsatisfied")
+
+    if policy is ApprovalPolicy.DUAL_APPROVAL:
+        # EB-002: dual approval must come from two *distinct qualified*
+        # approvers.  Identical signatures collapse to one grant above
+        # (set semantics), and unqualified signers never count toward the
+        # bar.  The qualification registry is required for DUAL_APPROVAL:
+        # with no registered qualified approvers, every request fails
+        # closed rather than trusting unknown identities.
+        qualified = granted & _QUALIFIED_APPROVERS
+        if len(qualified) < needs:
+            return _decide(
+                False,
+                f"dual approval requires {needs} distinct qualified "
+                f"approvers, got {len(qualified)}")
 
     return _decide(True, "approved")
 

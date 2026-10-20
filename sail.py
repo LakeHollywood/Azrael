@@ -24,12 +24,32 @@ Design principles (mirroring the repo's approval-gate invariants):
   gate modifications floor at 100 / RESTRICTED) cannot drift here.
 * Every decision produces an audit record via
   ``approval_gate.risk.create_approval_record``.
+
+Deferred (queued) jobs are supported natively::
+
+    enqueue(job)                     # hours earlier
+
+    decision = sail.authorize(
+        subject=job.owner,
+        action=job.action,
+        resource=job.resource,
+    )
+    if decision.allow:
+        execute(job)
+
+Because a job can sit in the queue for hours, authorize() stamps each
+decision with the time it was evaluated and enforces a freshness TTL
+(default 15 minutes, configurable per lifecycle profile or globally).
+A stale decision fails closed -- approvals must reflect current policy,
+not whatever the gate looked like when the job was enqueued.
 """
 
 from __future__ import annotations
 
+import time as _time_module
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping, Optional
 
 from approval_gate.risk import (
     ApprovalPolicy,
@@ -41,9 +61,13 @@ from approval_gate.risk import (
 __all__ = [
     "AuthorizationError",
     "AuthorizationDecision",
+    "Job",
+    "enqueue",
+    "drain_ready",
     "authorize",
     "register_tool",
     "register_lifecycle_action",
+    "set_decision_ttl",
     "register_senior_approver",
     "register_policy",
 ]
@@ -66,9 +90,23 @@ class AuthorizationDecision:
     risk_score: float
     reason: str
     record: Mapping[str, object] = field(default_factory=dict)
+    # Wall-clock time (epoch seconds) the decision was evaluated.  Queued
+    # jobs are authorized hours after enqueue; consumers must treat a
+    # decision older than ``ttl_seconds`` as stale and re-authorize.
+    evaluated_at: float = 0.0
+    ttl_seconds: float = 0.0
 
     def __bool__(self) -> bool:  # convenience: `if decision:` mirrors allow
         return self.allow
+
+    @property
+    def fresh(self) -> bool:
+        """True while the decision is still within its validity TTL."""
+        if not self.allow:
+            return False
+        if self.ttl_seconds <= 0:
+            return True
+        return (_now_epoch() - self.evaluated_at) <= self.ttl_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +152,177 @@ _ACTION_OVERRIDES: Mapping[str, tuple[float, float]] = {
 # deployment registers its seniors explicitly.
 _SENIOR_ROSTER: set[str] = set()
 
+# ---------------------------------------------------------------------------
+# Clock & decision freshness (queued jobs)
+# ---------------------------------------------------------------------------
+
+def _now_epoch() -> float:
+    return _time_module.time()
+
+
+def _to_epoch(value: Any) -> Optional[float]:
+    """Coerce a test-supplied clock value to epoch seconds.
+
+    Accepts epoch numbers, ``datetime`` instances, and module-like clocks
+    exposing ``utcnow()`` (the shape ``create_approval_record`` consumes).
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    utcnow = getattr(value, "utcnow", None)
+    if callable(utcnow):
+        naive = utcnow()  # module-style test clock: naive-UTC datetime
+        if isinstance(naive, datetime):
+            if naive.tzinfo is None:
+                naive = naive.replace(tzinfo=timezone.utc)
+            return naive.timestamp()
+        return _to_epoch(naive)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_clock(value: Any) -> Any:
+    """Adapt an injected clock for ``create_approval_record``.
+
+    The gate's record builder expects a module-like object exposing
+    ``utcnow()``; SAIL callers may inject plain epoch floats or datetimes,
+    so normalize everything to that shape (pass through objects that
+    already provide ``utcnow``, e.g. the ``datetime`` module itself).
+    """
+    if hasattr(value, "utcnow"):
+        return value
+    epoch = _to_epoch(value)
+    if epoch is None:
+        return value  # let the record builder surface the bad clock
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    return type(
+        "_FixedClock",
+        (),
+        {"utcnow": staticmethod(lambda: dt.replace(tzinfo=None))},
+    )()
+
+
+# How long an ALLOW decision stays actionable.  Queued jobs are authorized
+# at execution time (fresh evaluation), so this TTL mainly guards callers
+# that cache decisions between enqueue and execute.  <= 0 disables expiry.
+DEFAULT_DECISION_TTL_SECONDS = 15 * 60.0
+_DECISION_TTL = DEFAULT_DECISION_TTL_SECONDS
+
+
+def set_decision_ttl(seconds: Optional[float]) -> None:
+    """Set the global decision-freshness TTL (None restores the default)."""
+    global _DECISION_TTL
+    _DECISION_TTL = (
+        DEFAULT_DECISION_TTL_SECONDS if seconds is None else float(seconds)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deferred job queue: enqueue now, authorize + execute later
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Job:
+    """A unit of deferred work governed by SAIL at execution time."""
+
+    owner: str
+    action: str
+    resource: str
+    parameters: Mapping[str, Any] = field(default_factory=dict)
+    id: str = ""
+    enqueued_at: float = 0.0
+    status: str = "queued"          # queued | running | done | denied | failed
+    decision: Optional[AuthorizationDecision] = None
+
+
+_JOB_QUEUE: list[Job] = []
+
+
+def _job_field(job: Any, name: str, default: Any = None) -> Any:
+    """Read a queue field, tolerating caller-defined job classes.
+
+    Producers often enqueue their own job objects (duck-typed with
+    ``owner``/``action``/``resource``); missing bookkeeping fields get
+    defaults written back rather than raising AttributeError.
+    """
+    if hasattr(job, name):
+        return getattr(job, name)
+    value = default() if callable(default) else default
+    try:
+        setattr(job, name, value)
+    except (AttributeError, TypeError):
+        pass  # read-only object: use the default without persisting it
+    return value
+
+
+def enqueue(job: Any) -> Any:
+    """Add ``job`` to the deferred queue.
+
+    No authorization happens here -- the gate is evaluated when the job
+    actually runs, so policy changes during the queue delay take effect
+    (fail-closed on drift rather than honoring stale approvals).
+    """
+    if _job_field(job, "enqueued_at", 0.0) <= 0:
+        job.enqueued_at = _now_epoch()
+    _job_field(job, "status", "queued")
+    _JOB_QUEUE.append(job)
+    return job
+
+
+def pending_jobs() -> list[Any]:
+    """Snapshot of still-queued jobs (does not mutate the queue)."""
+    return [j for j in _JOB_QUEUE if getattr(j, "status", "queued") == "queued"]
+
+
+def drain_ready(
+    executor: Callable[[Any], Any],
+    *,
+    approvers_for: Optional[Callable[[Any], Optional[list[str]]]] = None,
+    clock: Any = None,
+    id_factory: Any = None,
+) -> list[tuple[Any, AuthorizationDecision]]:
+    """Authorize and execute every queued job, oldest first.
+
+    Each job gets a *fresh* :func:`authorize` call at execution time; jobs
+    whose decision denies are skipped (status ``denied``) and never handed
+    to ``executor``.  Executor exceptions mark the job ``failed``, release
+    it back to ``queued`` for retry, and abort the drain after recording
+    the failure (fail closed: a broken executor must not silently chew
+    through the queue).  Returns (job, decision) pairs for the jobs
+    attempted before the abort.
+    """
+    results: list[tuple[Any, AuthorizationDecision]] = []
+    for job in [j for j in _JOB_QUEUE
+                if getattr(j, "status", "queued") == "queued"]:
+        job.status = "running"
+        approvers = approvers_for(job) if approvers_for else None
+        decision = authorize(
+            subject=_job_field(job, "owner", ""),
+            action=_job_field(job, "action", ""),
+            resource=_job_field(job, "resource", ""),
+            parameters=_job_field(job, "parameters", dict) or {},
+            approvers=approvers,
+            clock=clock,
+            id_factory=id_factory,
+        )
+        job.decision = decision
+        if not decision.allow:
+            job.status = "denied"
+            results.append((job, decision))
+            continue
+        try:
+            executor(job)
+        except Exception:
+            job.status = "queued"  # transient failure -> eligible for retry
+            results.append((job, decision))
+            raise
+        job.status = "done"
+        results.append((job, decision))
+    return results
+
 
 def register_senior_approver(name: str) -> None:
     """Add ``name`` to the senior-operator roster."""
@@ -141,17 +350,21 @@ def register_lifecycle_action(
     *,
     affects_authz: bool = False,
     modifies_approval_gate: bool = False,
+    ttl_seconds: Optional[float] = None,
 ) -> None:
     """Register (or override) the risk profile for a lifecycle action.
 
     Intended for actions like ``workflow.resume`` or ``checkpoint.restore``
     where the governed surface is the action itself rather than a named
-    tool in :func:`register_tool`.
+    tool in :func:`register_tool`.  ``ttl_seconds`` optionally overrides the
+    decision-freshness window for this action (useful for queued jobs whose
+    approvals must expire faster or slower than the global default).
     """
     _LIFECYCLE_PROFILES[action] = {
         "risk_score": float(risk_score),
         "affects_authz": bool(affects_authz),
         "modifies_approval_gate": bool(modifies_approval_gate),
+        **({"ttl_seconds": float(ttl_seconds)} if ttl_seconds is not None else {}),
     }
 
 
@@ -202,25 +415,38 @@ def authorize(
       * SENIOR_APPROVAL band -> requires one senior approver.
       * SINGLE_APPROVAL band -> requires one approver.
       * AUTONOMOUS band -> allowed without human sign-off.
+
+    Queued jobs: the decision is evaluated at *execution* time and stamped
+    with ``evaluated_at``/``ttl_seconds``; a cached decision whose TTL has
+    elapsed reports ``fresh == False`` and must be re-authorized before the
+    work runs.  ``clock`` (epoch seconds or datetime) overrides "now" for
+    deterministic tests.
     """
+    now = _to_epoch(clock) if clock is not None else _now_epoch()
+    if now is None:
+        return _deny(0.0, ApprovalPolicy.RESTRICTED,
+                     "invalid clock supplied: fail closed")
+
     if not subject or not action or not resource:
         return _deny(0.0, ApprovalPolicy.RESTRICTED,
-                     "missing subject/action/resource: fail closed")
+                     "missing subject/action/resource: fail closed", now=now)
 
     profile = _TOOL_REGISTRY.get(resource)
     if profile is None:
-        # Resource is an instance id (workflow.id, checkpoint.id, ...);
-        # fall back to the action-level lifecycle profile before the
-        # max-risk default so governed transitions score deterministically.
+        # Resource is an instance id (workflow.id, checkpoint.id, job
+        # resource, ...); fall back to the action-level lifecycle profile
+        # before the max-risk default so governed transitions score
+        # deterministically.
         profile = _LIFECYCLE_PROFILES.get(action, _DEFAULT_TOOL_PROFILE)
     score = _score_operation(profile, action)
     policy = determine_policy(score)
+    ttl = float(profile.get("ttl_seconds", _DECISION_TTL))
 
     record = create_approval_record(
         score,
         operation=f"{action}:{resource}",
         actor=str(subject),
-        clock=clock,
+        clock=_record_clock(clock) if clock is not None else None,
         id_factory=id_factory,
         extra={"parameters_keys": sorted(parameters or {}), "subject": str(subject)},
     )
@@ -238,19 +464,19 @@ def authorize(
     # *independent* humans (or senior operators) distinct from the actor.
     granted.discard(str(subject))
 
+    def _decide(allow: bool, reason: str) -> AuthorizationDecision:
+        return AuthorizationDecision(allow, policy, score, reason, record,
+                                     evaluated_at=now, ttl_seconds=ttl)
+
     if needs is None:
         if break_glass and len(granted) >= 2:
-            return AuthorizationDecision(True, policy, score,
-                                         "break-glass override", record)
-        return AuthorizationDecision(False, policy, score,
-                                     f"policy {policy} denies by default",
-                                     record)
+            return _decide(True, "break-glass override")
+        return _decide(False, f"policy {policy} denies by default")
 
     if len(granted) < needs:
-        return AuthorizationDecision(
-            False, policy, score,
-            f"policy {policy} requires {needs} approver(s), got {len(granted)}",
-            record)
+        return _decide(
+            False,
+            f"policy {policy} requires {needs} approver(s), got {len(granted)}")
 
     if policy is ApprovalPolicy.SENIOR_APPROVAL:
         # Senior approvals come from the registered senior roster; anything
@@ -258,12 +484,20 @@ def authorize(
         # are known, so every SENIOR_APPROVAL request is denied.
         seniors = granted & _SENIOR_ROSTER
         if not seniors:
-            return AuthorizationDecision(
-                False, policy, score,
-                "senior approver roster unavailable or unsatisfied", record)
+            return _decide(
+                False, "senior approver roster unavailable or unsatisfied")
 
-    return AuthorizationDecision(True, policy, score, "approved", record)
+    return _decide(True, "approved")
 
 
-def _deny(score: float, policy: ApprovalPolicy, reason: str) -> AuthorizationDecision:
-    return AuthorizationDecision(False, policy, score, reason, {})
+def _deny(
+    score: float,
+    policy: ApprovalPolicy,
+    reason: str,
+    *,
+    now: Optional[float] = None,
+) -> AuthorizationDecision:
+    return AuthorizationDecision(False, policy, score, reason, {},
+                                 evaluated_at=(now if now is not None
+                                               else _now_epoch()),
+                                 ttl_seconds=0.0)

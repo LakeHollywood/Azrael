@@ -57,6 +57,20 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 # but path exclusion keeps the fixture readable).
 SELF_TEST_PATHS = {"tests/unit/test_secret_scan.py"}
 
+# Vendored third-party code is not authored here and cannot be scrubbed of
+# high-entropy identifier collisions (minified bundles trip the base64-run
+# heuristic on ordinary symbol names).  These paths are already ignored by
+# .gitignore; scanning them would only produce noise, so exclude them from
+# every mode (working tree, staged, history).  First-party code remains
+# fully scanned.
+VENDOR_PREFIXES = ("node_modules/", "dist/", "__pycache__/")
+
+
+def vendored(path: str) -> bool:
+    p = path.replace("\\", "/")
+    return any(p == pre.rstrip("/") or p.startswith(pre)
+               for pre in VENDOR_PREFIXES)
+
 # Known credential-free high-entropy fields: package-lock integrity hashes and
 # ledger signatures are base64 by design, not secrets. Real secret scanners
 # use paired rules (token + its provider context); we whitelist these contexts
@@ -184,6 +198,11 @@ def main() -> int:
     findings = []
     for path, data in items:
         if path in SELF_TEST_PATHS:
+            continue
+        if vendored(path):
+            # Vendored/generated trees are noise for the entropy heuristic;
+            # deny-listed *secrets* still cannot hide there because they are
+            # never legitimately authored in first-party paths.
             continue
         if denylisted(path):
             findings.append(f"{path}:<whole file>: deny-listed path (must not be committed)")

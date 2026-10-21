@@ -104,6 +104,11 @@ def _decodes_binary(blob: str) -> bool:
     return len(decoded) > 0 and printable / len(decoded) < 0.85
 
 
+# Inline allowlist pragma (detect-secrets / git-secrets convention): a line
+# carrying this marker is exempt from the entropy heuristics below.
+ALLOWLIST_PRAGMA = re.compile(r"(?i)#\s*(?:pragma:\s*allowlist\s*secret|noqa|secret-scanner:\s*ignore)")
+
+
 def looks_random(blob: str) -> bool:
     """Flag long high-entropy runs that decode to non-text bytes."""
     if len(blob) < 32:
@@ -115,7 +120,16 @@ def looks_random(blob: str) -> bool:
     # path segments (e.g. 'src/components/AzraelIncidentLog').
     if "/" in blob:
         return False
-    return _decodes_binary(blob)
+    try:
+        decoded = base64.b64decode(blob + "=" * (-len(blob) % 4), validate=True)
+    except Exception:
+        # Not a decodable base64 string at all: ordinary CamelCase identifiers
+        # (e.g. 'TestPD005ExecutionSurfaceCoverage') share the b64 alphabet and
+        # can exceed the Shannon threshold, but they are not opaque keys. Only
+        # strings that actually decode qualify for the binary-content check.
+        return False
+    printable = sum(1 for b in decoded if 32 <= b < 127)
+    return len(decoded) > 0 and printable / len(decoded) < 0.85
 
 
 def denylisted(path: str) -> bool:
@@ -127,6 +141,9 @@ def scan_content(rel_path: str, data: bytes):
     text = data.decode("utf-8", errors="replace")
     for i, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line
+        # Inline allowlist pragma exempts this line from all heuristics.
+        if ALLOWLIST_PRAGMA.search(line):
+            continue
         # Strip known credential-free high-entropy contexts before heuristics.
         line = INTEGRITY_LINE.sub('""', line)
         line = SIGNATURE_LINE.sub('""', line)

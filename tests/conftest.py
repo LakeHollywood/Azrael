@@ -21,6 +21,18 @@ if REPO_ROOT not in sys.path:
 
 from bench.sts_time import AssuranceLedger, STSMonotonicClock  # noqa: E402
 
+# Declare tests.sovereign.fixtures as a global pytest plugin for all subtrees.
+# Pytest loads root-level pytest_plugins before initiating collection, so the
+# shared Sovereign Engine fixtures (sts, gate, quarantine, boundary,
+# armed_gate) become universally discoverable across tests/unit/,
+# tests/abide/, and tests/harness/ without duplicating conftest.py shims in
+# every subtree.  Single source of truth: tests/sovereign/fixtures.py remains
+# the authoritative definition file.  Note: the sovereign suite's ``ledger``
+# fixture (sovereign_engine.gate.predicate.GateLedger) intentionally shadows
+# the bench ``ledger`` fixture below for tests that request it; the bench
+# AssuranceLedger remains available via direct import where needed.
+pytest_plugins = ["tests.sovereign.fixtures"]
+
 
 @pytest.fixture()
 def clock():

@@ -28,4 +28,7 @@ make
 ```
 
 ## License
-License pending (no `LICENSE` file has been adopted yet).
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+Copyright 2026 LakeHollywood + Kris Park.

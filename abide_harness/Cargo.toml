@@ -1,0 +1,18 @@
+[package]
+name = "abide-harness"
+version = "0.1.0"
+edition = "2021"
+description = "ABIDE reference-monitor harness: Rust parity mirror of the Python Sovereign Engine authority boundary (SAIL-SPEC-2026 frozen invariants I-III)."
+license = "Apache-2.0"
+
+[profile.release]
+lto = true
+
+[lib]
+name = "abide_harness"
+path = "src/lib.rs"
+
+# NOTE: no external dependencies (ed25519-compact/serde intentionally omitted:
+# this sandbox has no crates.io access). Signature verification is delegated to
+# a pluggable Verifier trait so the crypto backend can be wired in at build time
+# without touching the invariant logic.

@@ -28,14 +28,37 @@ help:
 # crate manifest is absent, so `make` never silently no-ops on this branch)
 # ---------------------------------------------------------------------------
 
-HAS_CARGO := $(shell test -f Cargo.toml && command -v cargo >/dev/null 2>&1 && echo 1 || echo 0)
+HAS_CARGO := $(shell command -v cargo >/dev/null 2>&1 && echo 1 || echo 0)
+# Crate location: root Cargo.toml if present, else the abide_harness/ crate.
+ifeq ($(wildcard Cargo.toml),Cargo.toml)
+CARGO := cargo
+MANIFEST :=
+else ifeq ($(wildcard abide_harness/Cargo.toml),abide_harness/Cargo.toml)
+CARGO := cargo
+MANIFEST := abide_harness/Cargo.toml
+else
+CARGO :=
+MANIFEST :=
+endif
+# Run all cargo commands from the crate directory (cargo fmt does not
+# support --manifest-path, so directory-based invocation is the portable way).
+ifeq ($(MANIFEST),)
+CRATE_DIR := .
+else
+CRATE_DIR := abide_harness
+endif
+CARGO_RUN := cd $(CRATE_DIR) && cargo
 
 # Build the crate in release mode
 build:
 ifeq ($(HAS_CARGO),1)
-	cargo build --release
+ifeq ($(CARGO),)
+	@echo "SKIP build: no Cargo.toml found at repo root or abide_harness/." >&2; exit 1
 else
-	@echo "SKIP build: no Cargo.toml / cargo toolchain found at repo root." >&2; exit 1
+	$(CARGO_RUN) build --release
+endif
+else
+	@echo "SKIP build: no cargo toolchain found." >&2; exit 1
 endif
 
 # Run all tests across unit, integration, and fuzz suites.
@@ -43,37 +66,51 @@ endif
 # Python: full pytest suite (canonical conformance + ABIDE vectors).
 test:
 ifeq ($(HAS_CARGO),1)
-	cargo test --all-targets
+ifneq ($(CARGO),)
+	$(CARGO_RUN) test --all-targets
+endif
 endif
 	pytest
 
 # Run the proptest suite specifically with output enabled
 fuzz:
 ifeq ($(HAS_CARGO),1)
-	cargo test --test property_tests -- --nocapture
+ifneq ($(CARGO),)
+	$(CARGO_RUN) test --test property_tests -- --nocapture
 else
-	@echo "SKIP fuzz: no Cargo.toml / cargo toolchain found at repo root." >&2; exit 1
+	@echo "SKIP fuzz: no Cargo.toml found at repo root or abide_harness/." >&2; exit 1
+endif
+else
+	@echo "SKIP fuzz: no cargo toolchain found." >&2; exit 1
 endif
 
 # Run strict Clippy checks enforcing zero warnings
 lint:
 ifeq ($(HAS_CARGO),1)
-	cargo clippy --all-targets -- -D warnings
+ifneq ($(CARGO),)
+	$(CARGO_RUN) clippy --all-targets -- -D warnings
 else
-	@echo "SKIP rust lint: no Cargo.toml at repo root." >&2
+	@echo "SKIP rust lint: no Cargo.toml found." >&2
+endif
+else
+	@echo "SKIP rust lint: no cargo toolchain found." >&2
 endif
 
 # Format source code (Rust + Python)
 fmt:
 ifeq ($(HAS_CARGO),1)
-	cargo fmt
+ifneq ($(CARGO),)
+	$(CARGO_RUN) fmt
+endif
 endif
 	@command -v ruff >/dev/null 2>&1 && ruff format src tests || echo "SKIP py fmt: ruff not installed."
 
 # Check formatting without modifying files (ideal for CI)
 check-fmt:
 ifeq ($(HAS_CARGO),1)
-	cargo fmt --check
+ifneq ($(CARGO),)
+	$(CARGO_RUN) fmt --check
+endif
 endif
 	@command -v ruff >/dev/null 2>&1 && ruff check src tests || echo "SKIP py lint: ruff not installed."
 

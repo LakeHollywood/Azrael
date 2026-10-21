@@ -159,16 +159,6 @@ def _env_keys():
     Returns None when neither variable is set (so callers fall back to dev
     key material) and (None, None) when they are present but malformed —
     fail closed either way.
-def _dev_keys():
-    """Return (hmac_secret_bytes, ed25519_pubkey_b64) or (None, None).
-
-    This reads the two files scripts/generate_dev_ledger_keys.py creates:
-    .ledgerdev/secret (raw HMAC-SHA256 secret bytes) and .ledgerdev/pub.b64
-    (base64url Ed25519 public key).
-
-    Resolution order: environment variables first (production/CI), then the
-    gitignored .ledgerdev/ files (local development).  Fail closed: callers
-    must refuse verification when either half is missing.
     """
     secret_b64 = os.environ.get(ENV_HMAC_SECRET_B64)
     pubkey = os.environ.get(ENV_PUBKEY_B64)
@@ -216,7 +206,7 @@ class LedgerAPI:
 
     Agent/task separation (see task_runner.py): this class owns identity,
     lifecycle, shared state (Redis backend, velocity monitor, idempotency
-      # cache) and supervision/audit — i.e. *who* runs and *whether* it may run.
+    cache) and supervision/audit — i.e. *who* runs and *whether* it may run.
     The actual request-time work lives in discrete TASKS:
 
       ``admit-transaction``  one transaction admission (balance/risk/velocity)

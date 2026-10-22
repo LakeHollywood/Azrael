@@ -189,6 +189,12 @@ class AssuranceLedger:
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    _INSERT_SQL = (
+        "INSERT INTO ledger (seq, mono_ns, utc_wall, stream, payload,"
+        " prev_seal, seal_hash, commit_latency_ms)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
     def append(self, clock: STSMonotonicClock, stream: str,
                payload: Dict[str, Any]) -> LedgerRow:
         """Commit one event; captures commit latency; seals the row.
@@ -196,6 +202,15 @@ class AssuranceLedger:
         The monotonic stamp is taken INSIDE the ledger lock so that seq order
         and timestamp order are atomic with respect to concurrent producers —
         the ordering guarantee must hold across threads, not just within one.
+
+        Performance note: exactly ONE fsync-bearing COMMIT per row. The
+        commit latency is measured around INSERT+COMMIT and recorded in the
+        returned row / in-memory latency distribution; like all latency
+        metadata it is deliberately EXCLUDED from the sealed fields, so the
+        row is verifiable byte-for-byte as written. (The previous
+        implementation ran a second INSERT-then-UPDATE-then-double-COMMIT
+        pass per row, doubling WAL fsyncs for a number that is not part of
+        the evidence chain.)
         """
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._lock:
@@ -205,24 +220,14 @@ class AssuranceLedger:
             prev_seal = self._prev_seal
             seal = self.compute_seal(seq, mono_ns, utc_wall, stream,
                                      payload_json, prev_seal)
-            # Latency is observability metadata, NOT evidence: it is measured
-            # around INSERT+COMMIT but excluded from the sealed fields so the
-            # row can be verified byte-for-byte without rewriting anything.
             t0 = time.perf_counter()
             self._conn.execute(
-                "INSERT INTO ledger (seq, mono_ns, utc_wall, stream, payload,"
-                " prev_seal, seal_hash, commit_latency_ms)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                self._INSERT_SQL,
                 (seq, mono_ns, utc_wall, stream, payload_json,
                  prev_seal, seal, 0.0),
             )
             self._conn.commit()
             latency_ms = (time.perf_counter() - t0) * 1000.0
-            self._conn.execute(
-                "UPDATE ledger SET commit_latency_ms = ? WHERE seq = ?",
-                (latency_ms, seq),
-            )
-            self._conn.commit()
             self._seq = seq
             self._prev_seal = seal
             self.commits += 1
@@ -232,7 +237,45 @@ class AssuranceLedger:
 
     def append_many(self, clock: STSMonotonicClock,
                     events: Iterable[Tuple[str, Dict[str, Any]]]) -> List[LedgerRow]:
-        return [self.append(clock, s, p) for s, p in events]
+        """Batch-commit events: one transaction (one fsync) for the whole batch.
+
+        Seals are still computed sequentially under the ledger lock, so the
+        hash-chain semantics (prev_seal linkage, seq contiguity, monotonic
+        stamps) are identical to row-by-row :meth:`append`; only the durable
+        commit boundary changes. Commit latency is recorded per row as the
+        amortized share of the batch's single INSERT+COMMIT wall time.
+        """
+        events = list(events)
+        if not events:
+            return []
+        rows: List[LedgerRow] = []
+        params: List[tuple] = []
+        with self._lock:
+            t0 = time.perf_counter()
+            for stream, payload in events:
+                mono_ns = clock.stamp()
+                utc_wall = time.time()  # metadata only — never ordering input
+                seq = self._seq + 1
+                prev_seal = self._prev_seal
+                payload_json = json.dumps(payload, sort_keys=True,
+                                          separators=(",", ":"))
+                seal = self.compute_seal(seq, mono_ns, utc_wall, stream,
+                                         payload_json, prev_seal)
+                params.append((seq, mono_ns, utc_wall, stream, payload_json,
+                               prev_seal, seal, 0.0))
+                rows.append(LedgerRow(seq, mono_ns, utc_wall, stream, payload,
+                                      prev_seal, seal, 0.0))
+                self._seq = seq
+                self._prev_seal = seal
+            self._conn.executemany(self._INSERT_SQL, params)
+            self._conn.commit()
+            batch_latency_ms = (time.perf_counter() - t0) * 1000.0
+            per_row_ms = batch_latency_ms / len(rows)
+            for row in rows:
+                row.commit_latency_ms = per_row_ms
+            self.commits += len(rows)
+            self.latencies_ms.extend([per_row_ms] * len(rows))
+        return rows
 
     # -- verification ---------------------------------------------------------
 

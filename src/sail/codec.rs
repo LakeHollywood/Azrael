@@ -241,7 +241,14 @@ fn from_hex_strict(s: &str) -> Option<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(src.len() / 2);
     for pair in src.chunks(2) {
-        if !pair[0].is_ascii_lowercase() || !pair[1].is_ascii_lowercase() {
+        // Strict lowercase hex: digits `0-9` are valid, but uppercase `A-F`
+        // must be rejected. `is_ascii_lowercase()` alone would wrongly reject
+        // every numeric nibble, so gate on hexdigit-ness first and then reject
+        // only ASCII uppercase letters.
+        if !pair[0].is_ascii_hexdigit() || !pair[1].is_ascii_hexdigit() {
+            return None;
+        }
+        if pair[0].is_ascii_uppercase() || pair[1].is_ascii_uppercase() {
             return None;
         }
         let hi = (pair[0] as char).to_digit(16)?;
@@ -464,8 +471,16 @@ mod tests {
         let k = ArtifactKey::from_bytes([0xab; DIGEST_LEN]);
         assert_eq!(k.to_hex(), "ab".repeat(32));
         assert_eq!(ArtifactKey::from_hex(&k.to_hex()).unwrap(), k);
+        // Numeric nibbles (`0`-`9`) are valid strict-lowercase hex and must
+        // decode — regression guard against rejecting decimal digits.
+        let d = ArtifactKey::from_bytes([0x01, 0x9f, 0x2a, 0x77, 0x88, 0x64, 0x55, 0x10,
+                                         0x00, 0x99, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                                         0x77, 0x88, 0x99, 0x00, 0x1a, 0x2b, 0x3c, 0x4d,
+                                         0x5e, 0x6f, 0x07, 0x08, 0x09, 0x0f, 0x0e, 0x0d]);
+        assert_eq!(ArtifactKey::from_hex(&d.to_hex()).unwrap(), d);
         // Uppercase / odd-length hex must be rejected.
         assert!(ArtifactKey::from_hex(&k.to_hex().to_uppercase()).is_none());
         assert!(ArtifactKey::from_hex("abc").is_none());
+        assert!(ArtifactKey::from_hex(&format!("{}A", "ab".repeat(31) + "a")).is_none());
     }
 }

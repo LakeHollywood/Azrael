@@ -1,0 +1,13 @@
+[package]
+name = "sail"
+version = "0.1.0"
+edition = "2021"
+description = "S.A.I.L. Architecture Stack: deterministic SAIL-V1-* serialization, content-addressed evidence storage, and authority-gating verification."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "sail"
+path = "lib.rs"
+
+[dependencies]
+serde = { version = "=1.0.185" }

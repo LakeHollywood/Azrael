@@ -55,8 +55,8 @@
     "previous_ledger_hash": "sha256:1ab1bec5e56b98af38efc52f7745dc63180cb323408dd5967dc5f10792835112",
     "payload_hash": "sha256:9527159b93cc029f1866a6ac2d9b66aca719498cdbfc4de4a73d15e52f238744",
     "current_hash": "sha256:c50670058f9fe93752fd051ace41df9f5c3aa4148a0983c666f1756472a0c2ba",
-    "signature": "ed25519:NurAwRKYP3ez0q5wVyGyJbjTxO9N3PCLLazcsTb8-lXR56U9wJ3eRwUXAJvGNk5SGByIdbnZMrbktt2D-Z8WBg=="
+    "signature": "ed25519:NurAwRKYP3ez0q5wVyGyJbjTxO9N3PCLLazcsTb8-lXR56U9wJ3eRwUXAJvGNk5SGByIdbnZMrbktt2D-Z8WBg==",
     "current_hash": "sha256:4c42facbd7079fe55edc3a33e8c6797c851e206bf11ade638540987eb323fea5",
-    "signature": "ed25519:vEkau2EBVJq9HtuuBAWnCfvNk13A6hnIBXfmu_oK5Zvqs5V8hu0iovgFD9pNjxJEtk5ECUl8YuUke9RN_YQnCg=="
+    "signature": "ed25519:vEkau2EBVJq9HtuuBAWnCfvNk13A6hnIBXfmu_oK5Zvqs5V8hu0iovgFD9pNjxJEtk5ECUl8YuUke9RN_YQnCg==",
   }
 ]
